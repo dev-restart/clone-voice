@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>local.clonevoice.apple-speech</string>
+	<key>CFBundleExecutable</key>
+	<string>apple_speech_transcribe</string>
+	<key>CFBundleName</key>
+	<string>Clone Voice Apple Speech</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Clone Voice uses Apple Speech to transcribe selected local audio files.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Clone Voice may use the microphone when transcribing recorded local audio.</string>
+</dict>
+</plist>

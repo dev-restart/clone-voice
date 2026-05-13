@@ -1,0 +1,51 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.*
+!.env.example
+!.env.test
+
+# Python
+__pycache__/
+*.py[oc]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+build/
+dist/
+wheels/
+*.egg-info/
+
+# Backend runtime / local models
+backend/storage/
+backend/vendor/
+backend/pretrained_models/
+backend/models/
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+*.onnx
+*.bin
+*.gguf
+
+# Frontend
+frontend/node_modules/
+frontend/.svelte-kit/
+frontend/build/
+frontend/.output/
+frontend/.vercel/
+frontend/.netlify/
+frontend/.wrangler/
+frontend/vite.config.js.timestamp-*
+frontend/vite.config.ts.timestamp-*
+frontend/test-results/
+frontend/playwright-report/
+
+# Local tooling state
+.omx/
+.git-metadata-backups/

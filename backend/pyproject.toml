@@ -1,0 +1,36 @@
+[project]
+name = "clone-voice-backend"
+version = "0.1.0"
+description = "FastAPI backend for OmniVoice voice cloning and speech processing"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi[standard]>=0.136.1",
+    "numpy>=2.2.0",
+    "pydantic-settings>=2.14.0",
+    "python-multipart>=0.0.20",
+    "soundfile>=0.13.1",
+    "librosa>=0.11.0",
+    "openai-whisper>=20250625",
+    "sqlalchemy>=2.0.49",
+    "alembic>=1.18.4",
+    "yt-dlp>=2026.3.17",
+]
+
+[project.optional-dependencies]
+omnivoice = [
+    "torch==2.8.0",
+    "torchaudio==2.8.0",
+    "omnivoice @ git+https://github.com/k2-fsa/OmniVoice.git",
+]
+voxcpm = [
+    "torchcodec>=0.7,<0.8",
+    "voxcpm @ git+https://github.com/OpenBMB/VoxCPM.git",
+]
+dev = [
+    "pytest>=9.0.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

@@ -1,0 +1,15 @@
+{
+  "name": "clone-voice-studio",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "setup": "make setup",
+    "dev": "make dev",
+    "models": "make models",
+    "check": "make check",
+    "dev:backend": "make dev-backend",
+    "dev:frontend": "make dev-frontend"
+  },
+  "packageManager": "pnpm@10.33.0"
+}

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Clone Voice">
+  <rect width="128" height="128" rx="32" fill="#1e1a14"/>
+  <circle cx="64" cy="64" r="48" fill="#f3deca" opacity="0.16"/>
+  <path d="M28 66c8-18 18-18 28 0s20 18 30 0 18-18 14 0" fill="none" stroke="#fff8eb" stroke-width="10" stroke-linecap="round"/>
+  <path d="M28 66c8-18 18-18 28 0s20 18 30 0 18-18 14 0" fill="none" stroke="#b96d32" stroke-width="4" stroke-linecap="round"/>
+</svg>
