@@ -6,7 +6,21 @@ Thumbs.db
 .env
 .env.*
 !.env.example
-!.env.test
+
+# Private settings and credentials, including custom storage locations
+ai_text_settings.json
+ai_text_connections.json
+.ai_text_*.json.*.tmp
+cookies.txt
+*cookies*.txt
+*.pem
+*.key
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
 
 # Python
 __pycache__/
@@ -32,6 +46,7 @@ backend/models/
 *.onnx
 *.bin
 *.gguf
+*.npz
 
 # Frontend
 frontend/node_modules/
@@ -45,7 +60,4 @@ frontend/vite.config.js.timestamp-*
 frontend/vite.config.ts.timestamp-*
 frontend/test-results/
 frontend/playwright-report/
-
-# Local tooling state
-.omx/
-.git-metadata-backups/
+frontend/.vscode/

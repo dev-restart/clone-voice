@@ -8,6 +8,7 @@ import numpy as np
 import soundfile as sf
 
 from app.config import Settings, get_settings
+from app.i18n import tr
 from app.schemas import GenerationPreviewRequest, GenerationPreviewResponse, TranscriptSegmentsResponse, VoiceProfile, public_file_url
 from app.services.omnivoice_service import (
     MockVoiceEngine,
@@ -36,6 +37,8 @@ VOXCPM_LONG_SCRIPT_CHUNK_CHARS = 180
 VOXCPM_LONG_SCRIPT_CHUNK_CHARS_KO = 450
 VOXCPM_LONG_SCRIPT_CHUNK_CHARS_CJK_TRANSLATION = 100
 AUTO_CHUNK_PAUSE_MS = 220
+LINE_BREAK_PAUSE_MS = 480
+PARAGRAPH_BREAK_PAUSE_MS = 900
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?。！？…])\s+|\n+")
 _SOFT_SPLIT_RE = re.compile(r"(?<=[,，、;；:：])\s*")
 _HANGUL_RE = re.compile(r"[가-힣]")
@@ -153,16 +156,38 @@ def split_plain_tts_text(
     compact_length = len(re.sub(r"\s+", "", cleaned))
     estimated_seconds = estimate_tts_duration(cleaned, speed)
     long_by_duration = estimated_seconds > VOXCPM_AUTO_CHUNK_ESTIMATED_SECONDS
-    if compact_length <= target_max_chars and not long_by_duration:
+    has_explicit_break = "\n" in cleaned
+    if compact_length <= target_max_chars and not long_by_duration and not has_explicit_break:
         return None
     if long_by_duration and max_chars is None:
         target_max_chars = min(target_max_chars, _voxcpm_long_script_chunk_chars_for_text(cleaned, language))
 
-    chunks = [(chunk, pause_after_ms) for chunk in _merge_text_pieces(_split_text_pieces(cleaned, target_max_chars), target_max_chars)]
+    chunks = _split_text_with_break_pauses(cleaned, target_max_chars, pause_after_ms)
     if len(chunks) <= 1:
         return None
 
     return _segments_from_chunks(chunks, target_max_chars, pause_after_ms)
+
+
+def _split_text_with_break_pauses(text: str, max_chars: int, fallback_pause_after_ms: int) -> list[tuple[str, int]]:
+    chunks: list[tuple[str, int]] = []
+    parts = re.split(r"(\n+)", text)
+    for index in range(0, len(parts), 2):
+        block = parts[index].strip()
+        if not block:
+            continue
+        block_chunks = _merge_text_pieces(_split_text_pieces(block, max_chars), max_chars)
+        following_break = parts[index + 1] if index + 1 < len(parts) else ""
+        explicit_pause = (
+            PARAGRAPH_BREAK_PAUSE_MS
+            if following_break.count("\n") >= 2
+            else LINE_BREAK_PAUSE_MS if following_break else fallback_pause_after_ms
+        )
+        chunks.extend(
+            (chunk, explicit_pause if chunk_index == len(block_chunks) - 1 else fallback_pause_after_ms)
+            for chunk_index, chunk in enumerate(block_chunks)
+        )
+    return chunks
 
 
 def _voxcpm_auto_chunk_chars_for_text(text: str, language: str | None) -> int:
@@ -267,6 +292,18 @@ def narration_instruct(segment: dict, fallback: str | None, language: str | None
     return combine_omnivoice_instruct(", ".join(normalized) or None, language, accent)
 
 
+def _soften_segment_edges(waveform: np.ndarray, sample_rate: int, fade_ms: float = 6.0) -> np.ndarray:
+    """단락 경계의 딱 소리(click)를 막기 위해 길이를 바꾸지 않고 앞뒤를 짧게 페이드합니다."""
+    fade = min(int(sample_rate * fade_ms / 1000), len(waveform) // 2)
+    if fade < 2:
+        return waveform
+    softened = waveform.copy()
+    ramp = np.linspace(0.0, 1.0, fade, dtype=np.float32)
+    softened[:fade] *= ramp
+    softened[-fade:] *= ramp[::-1]
+    return softened
+
+
 def combine_generated_segments(parts: list[tuple[Path, int]], output_dir: Path, sample_rate: int | None = None) -> tuple[Path, float]:
     loaded_parts: list[tuple[np.ndarray, int, int]] = []
     target_rate = sample_rate or 0
@@ -287,7 +324,7 @@ def combine_generated_segments(parts: list[tuple[Path, int]], output_dir: Path, 
                 waveform = librosa.resample(waveform, orig_sr=loaded_rate, target_sr=target_rate)
             except Exception as exc:
                 raise RuntimeError(f"Could not resample generated segment: {exc}") from exc
-        waveforms.append(np.asarray(waveform, dtype=np.float32))
+        waveforms.append(_soften_segment_edges(np.asarray(waveform, dtype=np.float32), target_rate))
         if pause_after_ms > 0:
             waveforms.append(np.zeros(int(target_rate * pause_after_ms / 1000), dtype=np.float32))
 
@@ -351,7 +388,7 @@ async def run_generation_with_progress(
     heartbeat = 0
     percent = start_percent
     while not task.done():
-        message = f"{label} 모델 합성 중입니다. 경과 {heartbeat}s"
+        message = tr(f"{label} 모델 합성 중입니다. 경과 {heartbeat}s", f"Synthesizing with {label}… {heartbeat}s elapsed")
         publish_progress(progress_id, percent, message)
         await asyncio.sleep(1)
         heartbeat += 1
@@ -387,21 +424,21 @@ def build_generation_preview(request: GenerationPreviewRequest, voice: VoiceProf
         mode = "auto"
     notes: list[str] = []
     if voice:
-        notes.append(f"복제 모드: '{voice.name}' 목소리의 음색을 reference로 사용합니다.")
+        notes.append(tr(f"복제 모드: '{voice.name}' 목소리의 음색을 reference로 사용합니다.", f"Clone mode: using the timbre of voice '{voice.name}' as the reference."))
     elif mode == "design":
-        notes.append("Voice Design: 등록 목소리 없이 instruct 속성으로 목소리를 설계합니다.")
+        notes.append(tr("Voice Design: 등록 목소리 없이 instruct 속성으로 목소리를 설계합니다.", "Voice Design: designing a voice from instruct attributes without a registered voice."))
     else:
-        notes.append("Auto Voice: reference와 instruct 없이 모델 기본 목소리로 생성합니다.")
+        notes.append(tr("Auto Voice: reference와 instruct 없이 모델 기본 목소리로 생성합니다.", "Auto Voice: generating with the model default voice, with no reference or instruct."))
     if language_hint:
-        notes.append(f"선택 대본 언어는 {language_hint}로 OmniVoice language hint에 전달됩니다.")
+        notes.append(tr(f"선택 대본 언어는 {language_hint}로 OmniVoice language hint에 전달됩니다.", f"The script language is passed to OmniVoice as the language hint {language_hint}."))
     if language == "en" and explicit_accent:
-        notes.append(f"영어는 선택한 {explicit_accent} 억양 힌트를 적용합니다.")
+        notes.append(tr(f"영어는 선택한 {explicit_accent} 억양 힌트를 적용합니다.", f"English uses the selected {explicit_accent} accent hint."))
     elif accent_hint:
-        notes.append(f"{language_hint or language} 대본에는 {accent_hint} 힌트를 자동 적용합니다.")
+        notes.append(tr(f"{language_hint or language} 대본에는 {accent_hint} 힌트를 자동 적용합니다.", f"The {accent_hint} hint is applied automatically to {language_hint or language} scripts."))
     elif request.accent:
-        notes.append("선택한 억양은 이 언어에서 OmniVoice 지원 항목이 아니므로 적용하지 않습니다.")
+        notes.append(tr("선택한 억양은 이 언어에서 OmniVoice 지원 항목이 아니므로 적용하지 않습니다.", "The selected accent is not supported by OmniVoice for this language, so it is not applied."))
     if request.tone_prompt and not safe_tone:
-        notes.append("입력한 톤 문구는 OmniVoice 지원 instruct가 아니어서 안전하게 제외됩니다.")
+        notes.append(tr("입력한 톤 문구는 OmniVoice 지원 instruct가 아니어서 안전하게 제외됩니다.", "The tone text is not an OmniVoice-supported instruct, so it is safely left out."))
     return GenerationPreviewResponse(
         mode=mode,
         voice_id=voice.id if voice else None,
@@ -433,5 +470,5 @@ def transcribe_with_segments(
         settings=settings or get_settings(),
     )
     if not text_result.segments and not text_result.text:
-        raise RuntimeError("음성에서 텍스트를 찾지 못했습니다.")
+        raise RuntimeError(tr("음성에서 텍스트를 찾지 못했습니다.", "No text was found in the audio."))
     return text_result

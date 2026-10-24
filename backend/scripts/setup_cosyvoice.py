@@ -79,7 +79,7 @@ def main() -> None:
         model_dir = configured_model_dir if configured_model_dir.is_absolute() else repo_dir / configured_model_dir
         download_model(python, repo_dir, args.model_id, model_dir)
     print("CosyVoice setup complete.")
-    print(f"Set CLONE_VOICE_COSYVOICE_ENABLED=true")
+    print("Set CLONE_VOICE_COSYVOICE_ENABLED=true")
     print(f"Set CLONE_VOICE_COSYVOICE_REPO_DIR={repo_dir}")
     print(f"Set CLONE_VOICE_COSYVOICE_PYTHON={python}")
     if args.download_model:

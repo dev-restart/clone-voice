@@ -31,7 +31,8 @@ def _voice_to_schema(row: DbVoice) -> VoiceProfile:
     )
 
 
-def _result_to_schema(row: DbGenerationResult) -> ContentResult:
+def _result_to_schema(row: DbGenerationResult, metadata: dict | None = None) -> ContentResult:
+    metadata = metadata or {}
     return ContentResult(
         id=row.id,
         language=row.language,
@@ -46,17 +47,22 @@ def _result_to_schema(row: DbGenerationResult) -> ContentResult:
         effective_instruct=row.effective_instruct,
         language_hint=row.language_hint,
         accent_hint=row.accent_hint,
+        spoken_text=metadata.get("spoken_text"),
+        production_settings=metadata.get("production_settings"),
         created_at=row.created_at,
     )
 
 
-def _content_to_schema(row: DbContent) -> ContentItem:
+def _content_to_schema(row: DbContent, metadata: dict | None = None) -> ContentItem:
+    metadata = metadata or {}
     return ContentItem(
         id=row.id,
         title=row.title,
         source_text=row.source_text,
+        source_language=metadata.get('source_language') or (metadata.get('production_settings') or {}).get('language', 'ko'),
         translations=row.translations or {},
-        results=[_result_to_schema(result) for result in row.results],
+        production_settings=metadata.get("production_settings"),
+        results=[_result_to_schema(result, metadata.get("results", {}).get(result.id)) for result in row.results],
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -123,13 +129,25 @@ class ContentRepository:
         rows = self.session.scalars(
             select(DbContent).options(selectinload(DbContent.results)).order_by(DbContent.updated_at.desc())
         ).all()
-        return [_content_to_schema(row) for row in rows]
+        keys = [self._settings_key(row.id) for row in rows]
+        metadata = {
+            item.key: item.value
+            for item in self.session.scalars(select(DbStudioSetting).where(DbStudioSetting.key.in_(keys))).all()
+        } if keys else {}
+        return [_content_to_schema(row, metadata.get(self._settings_key(row.id))) for row in rows]
+
+    @staticmethod
+    def _settings_key(content_id: str) -> str:
+        # Keep production metadata in the existing JSON settings table so older
+        # local databases remain readable without a destructive schema rebuild.
+        return f"content-production:{content_id}"
 
     def get(self, content_id: str) -> ContentItem | None:
         row = self.session.scalar(
             select(DbContent).where(DbContent.id == content_id).options(selectinload(DbContent.results))
         )
-        return _content_to_schema(row) if row else None
+        metadata = StudioSettingsRepository(self.session).get(self._settings_key(content_id))
+        return _content_to_schema(row, metadata) if row else None
 
     def save(self, content: ContentItem) -> ContentItem:
         now = datetime.now(timezone.utc)
@@ -163,6 +181,18 @@ class ContentRepository:
             result_row.effective_instruct = result.effective_instruct
             result_row.language_hint = result.language_hint
             result_row.accent_hint = result.accent_hint
+        StudioSettingsRepository(self.session).set(self._settings_key(content.id), {
+            "source_language": content.source_language,
+            "production_settings": content.production_settings.model_dump(mode="json") if content.production_settings else None,
+            "results": {
+                result.id: {
+                    "spoken_text": result.spoken_text,
+                    "production_settings": result.production_settings.model_dump(mode="json") if result.production_settings else None,
+                }
+                for result in content.results
+                if result.spoken_text is not None or result.production_settings is not None
+            },
+        })
         self.session.flush()
         self.session.expire(row, ["results"])
         return self.get(content.id) or content
@@ -173,6 +203,9 @@ class ContentRepository:
         if row is None:
             return None
         self.session.delete(row)
+        metadata = self.session.get(DbStudioSetting, self._settings_key(content_id))
+        if metadata is not None:
+            self.session.delete(metadata)
         self.session.flush()
         return target
 

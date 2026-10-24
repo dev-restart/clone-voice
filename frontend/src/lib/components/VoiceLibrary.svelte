@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { t } from '$lib/i18n/index.svelte';
   import {
     ImagePlus,
     Pencil,
@@ -8,10 +9,13 @@
     Trash2,
     UserRound,
     Wand2,
+    AudioLines,
+    BookOpenText,
     X,
-  } from "lucide-svelte";
+  } from "@lucide/svelte";
   import { apiFetch, audioUrl, formatDate, formatTime } from "$lib/studio/api";
   import type { VoiceProfile } from "$lib/studio/types";
+  import { cloneReadiness } from "$lib/studio/voices";
 
   let {
     voices,
@@ -21,6 +25,8 @@
     onDelete,
     onUpdate,
     onNotice,
+    onUse,
+    canUseCover = false,
   }: {
     voices: VoiceProfile[];
     selectedVoiceId: string;
@@ -29,47 +35,33 @@
     onDelete: (id: string) => Promise<void>;
     onUpdate: (voice: VoiceProfile) => void;
     onNotice: (type: "success" | "error" | "info", text: string) => void;
+    onUse: (id: string, target: 'tts' | 'story' | 'changer') => void;
+    canUseCover?: boolean;
   } = $props();
 
   let query = $state("");
-  let tab = $state<"mine" | "defaults">("mine");
+  let filter = $state<"all" | "precise" | "missing">("all");
   let editingId = $state("");
   let editName = $state("");
   let editDescription = $state("");
+  let editTranscript = $state("");
   let editAvatarPreview = $state<string | null>(null);
   let busyId = $state("");
-  const defaultPresets = [
-    {
-      name: "Korean Female Narrator",
-      desc: "차분한 한국어 여성 내레이션",
-      tags: ["female", "moderate pitch", "korean accent"],
-    },
-    {
-      name: "Korean Male Guide",
-      desc: "신뢰감 있는 남성 안내 음성",
-      tags: ["male", "low pitch", "korean accent"],
-    },
-    {
-      name: "Bright Child",
-      desc: "밝고 높은 피치의 아이 목소리 프리셋",
-      tags: ["child", "high pitch"],
-    },
-    {
-      name: "English Storyteller",
-      desc: "영어 스토리텔링용 미국식 억양",
-      tags: ["young adult", "american accent"],
-    },
-  ];
+  let transcribingId = $state("");
+  let selectedVoice = $derived(voices.find((voice) => voice.id === selectedVoiceId));
+  let preciseCount = $derived(voices.filter((voice) => cloneReadiness(voice).precise).length);
   let filtered = $derived(
     voices.filter((voice) => {
       const target =
         `${voice.name} ${voice.description ?? ""} ${voice.transcript ?? ""}`.toLowerCase();
+      if (filter === "precise" && !cloneReadiness(voice).precise) return false;
+      if (filter === "missing" && cloneReadiness(voice).precise) return false;
       return target.includes(query.toLowerCase());
     }),
   );
 
   function range(voice: VoiceProfile) {
-    if (!voice.trim_end) return "구간 미설정";
+    if (!voice.trim_end) return t('voicelib.noRange');
     return `${formatTime(voice.trim_start ?? 0)} - ${formatTime(voice.trim_end)}`;
   }
 
@@ -77,6 +69,7 @@
     editingId = voice.id;
     editName = voice.name;
     editDescription = voice.description ?? "";
+    editTranscript = voice.transcript ?? "";
     editAvatarPreview = voice.avatar ?? null;
   }
 
@@ -84,6 +77,7 @@
     editingId = "";
     editName = "";
     editDescription = "";
+    editTranscript = "";
     editAvatarPreview = null;
   }
 
@@ -96,16 +90,38 @@
         body: JSON.stringify({
           name: editName,
           description: editDescription,
+          transcript: editTranscript,
         }),
       });
       const updated = await response.json();
       onUpdate(updated);
       cancelEdit();
-      onNotice("success", "목소리 정보를 수정했습니다.");
+      onNotice("success", t('voicelib.updated'));
     } catch (error) {
       onNotice("error", error instanceof Error ? error.message : String(error));
     } finally {
       busyId = "";
+    }
+  }
+
+  async function autoTranscribe(voice: VoiceProfile) {
+    transcribingId = voice.id;
+    try {
+      const params = new URLSearchParams({ language: voice.language || "ko" });
+      if (voice.trim_end) {
+        params.set("trim_start", String(voice.trim_start ?? 0));
+        params.set("trim_end", String(voice.trim_end));
+      }
+      const response = await apiFetch(`/api/voices/${voice.id}/transcript-segments?${params}`);
+      const payload = await response.json();
+      const text = String(payload.text ?? "").trim();
+      if (!text) throw new Error(t('voicelib.emptyTranscript'));
+      editTranscript = text;
+      onNotice("info", t('voicelib.transcribed'));
+    } catch (error) {
+      onNotice("error", error instanceof Error ? error.message : String(error));
+    } finally {
+      transcribingId = "";
     }
   }
 
@@ -125,7 +141,7 @@
       const updated = await response.json();
       onUpdate(updated);
       editAvatarPreview = updated.avatar ?? null;
-      onNotice("success", "아바타 이미지를 수정했습니다.");
+      onNotice("success", t('voicelib.avatarUpdated'));
     } catch (error) {
       onNotice("error", error instanceof Error ? error.message : String(error));
     } finally {
@@ -138,29 +154,35 @@
 <section class="surface">
   <div class="section-heading">
     <div>
-      <h2>음성 라이브러리</h2>
-      <p>제작에 사용할 기준 목소리와 프리셋을 관리합니다.</p>
+      <h2>{t('voicelib.title')}</h2>
     </div>
     <button class="primary-action" onclick={onCreate}
-      ><Plus size={18} />새 목소리</button
+      ><Plus size={18} />{t('nav.voice.register')}</button
     >
   </div>
-  <div class="tabs">
-    <button class:active={tab === "mine"} onclick={() => (tab = "mine")}
-      >나의 목소리</button
-    >
-    <button class:active={tab === "defaults"} onclick={() => (tab = "defaults")}
-      >기본 음성</button
-    >
-  </div>
-  {#if tab === "mine"}
+  {#if selectedVoice}
+    <div class="voice-use-bar">
+      <span><strong>{selectedVoice.name}</strong><small>{t('voicelib.selectedHint')}</small></span>
+      <div>
+        <button class="primary-action" onclick={() => onUse(selectedVoice.id, 'tts')}><AudioLines size={16} />{t('voicelib.narrate')}</button>
+        <button class="secondary-action" onclick={() => onUse(selectedVoice.id, 'story')}><BookOpenText size={16} />{t('voicelib.dialogue')}</button>
+        <button class="secondary-action" disabled={!canUseCover} onclick={() => onUse(selectedVoice.id, 'changer')}><Wand2 size={16} />{t('voicelib.cover')}</button>
+      </div>
+    </div>
+  {/if}
     <label class="search-box">
       <Search size={18} />
       <input
         bind:value={query}
-        placeholder="이름, 설명, 대본으로 목소리 검색"
+        placeholder={t('voicelib.searchPlaceholder')}
+        aria-label={t('voicelib.searchLabel')}
       />
     </label>
+    <div class="voice-filter" role="group" aria-label={t('voicelib.filterLabel')}>
+      <button type="button" class:active={filter === "all"} onclick={() => (filter = "all")}>{t('voicelib.filter.all', { count: voices.length })}</button>
+      <button type="button" class:active={filter === "precise"} onclick={() => (filter = "precise")}>{t('voicelib.filter.precise', { count: preciseCount })}</button>
+      <button type="button" class:active={filter === "missing"} onclick={() => (filter = "missing")}>{t('voicelib.filter.missing', { count: voices.length - preciseCount })}</button>
+    </div>
     <div class="voice-card-grid">
       {#each filtered as voice (voice.id)}
         <article
@@ -173,7 +195,7 @@
               <div class="voice-main editing">
                 <label
                   class="avatar voice-avatar avatar-edit-trigger"
-                  aria-label="아바타 이미지 수정"
+                  aria-label={t('voicelib.avatarLabel')}
                 >
                   {#if editAvatarPreview}
                     <img src={audioUrl(editAvatarPreview)} alt="" />
@@ -195,11 +217,11 @@
                 </label>
                 <span>
                   <strong>{voice.name}</strong>
-                  <small>아바타를 눌러 이미지를 수정할 수 있습니다.</small>
+                  <small>{t('voicelib.avatarHint')}</small>
                 </span>
               </div>
             {:else}
-              <button class="voice-main" onclick={() => onSelect(voice.id)}>
+              <button class="voice-main" aria-label={t('voicelib.pick', { name: voice.name })} aria-pressed={selectedVoiceId === voice.id} onclick={() => onSelect(voice.id)}>
                 <span class="avatar voice-avatar">
                   {#if voice.avatar}
                     <img src={audioUrl(voice.avatar)} alt="" />
@@ -218,24 +240,24 @@
                 <button
                   class="icon-button"
                   disabled={busyId === voice.id}
-                  aria-label="수정 저장"
+                  aria-label={t('voicelib.saveEdit')}
                   onclick={() => saveEdit(voice)}><Save size={17} /></button
                 >
                 <button
                   class="icon-button"
                   disabled={busyId === voice.id}
-                  aria-label="수정 취소"
+                  aria-label={t('voicelib.cancelEdit')}
                   onclick={cancelEdit}><X size={17} /></button
                 >
               {:else}
                 <button
                   class="icon-button"
-                  aria-label="목소리 수정"
+                  aria-label={t('voicelib.edit')}
                   onclick={() => startEdit(voice)}><Pencil size={17} /></button
                 >
                 <button
                   class="icon-button danger"
-                  aria-label="목소리 삭제"
+                  aria-label={t('voicelib.delete')}
                   onclick={() => onDelete(voice.id)}
                   ><Trash2 size={17} /></button
                 >
@@ -246,30 +268,39 @@
           {#if editingId === voice.id}
             <div class="voice-edit-form">
               <label
-                >목소리 타이틀<input
+                >{t('voice.script.name')}<input
                   class="studio-input"
                   bind:value={editName}
                 /></label
               >
               <label
-                >설명<textarea
+                >{t('voicelib.description')}<textarea
                   class="studio-input compact-textarea"
                   bind:value={editDescription}
-                  placeholder="이 목소리의 톤, 용도, 특징을 적어두세요."
+                  placeholder={t('voicelib.descriptionPlaceholder')}
                 ></textarea></label
               >
+              <label>{t('voicelib.script')}<textarea class="studio-input compact-textarea" bind:value={editTranscript} placeholder={t('voicelib.transcriptPlaceholder')}></textarea></label>
+              <button type="button" class="secondary-action mini" disabled={transcribingId === voice.id || busyId === voice.id} onclick={() => autoTranscribe(voice)}>{transcribingId === voice.id ? t('voice.script.busy') : t('voicelib.autoTranscribe')}</button>
             </div>
           {:else}
             <p class="voice-description">
-              {voice.description || "설명이 없습니다."}
+              {voice.description || t('voicelib.noDescription')}
             </p>
             {#if voice.transcript}<p class="voice-transcript">
                 {voice.transcript}
               </p>{/if}
+            {@const readiness = cloneReadiness(voice)}
+            <div class="clone-state" class:precise={readiness.precise}>
+              <strong>{readiness.label}</strong>
+              <span>{readiness.hint}</span>
+              {#if readiness.warning}<em>{readiness.warning}</em>{/if}
+              {#if !readiness.precise}<button type="button" onclick={() => startEdit(voice)}>{t('voicelib.addScript')}</button>{/if}
+            </div>
           {/if}
 
           <div class="voice-audio-panel">
-            <span>녹음 음성</span>
+            <span>{t('voicelib.reference')}</span>
             {#if voice.audio_url}<audio controls src={audioUrl(voice.audio_url)}
               ></audio>{/if}
           </div>
@@ -277,29 +308,26 @@
       {:else}
         <div class="empty-state">
           <UserRound size={54} />
-          <h3>아직 등록된 목소리가 없습니다</h3>
-          <p>
-            깨끗한 5~10초 샘플을 등록하면 TTS, 스토리, 보이스 체인저에서 바로
-            사용할 수 있습니다.
-          </p>
+          <h3>{t('voicelib.empty')}</h3>
           <button class="primary-action" onclick={onCreate}
-            ><Plus size={18} />새 목소리</button
+            ><Plus size={18} />{t('nav.voice.register')}</button
           >
         </div>
       {/each}
     </div>
-  {:else}
-    <div class="preset-grid">
-      {#each defaultPresets as preset (preset.name)}
-        <article class="preset-card">
-          <div class="preset-avatar"><Wand2 size={22} /></div>
-          <h3>{preset.name}</h3>
-          <p>{preset.desc}</p>
-          <div class="tag-row">
-            {#each preset.tags as tag (tag)}<span>{tag}</span>{/each}
-          </div>
-        </article>
-      {/each}
-    </div>
-  {/if}
 </section>
+
+<style>
+  .voice-use-bar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 14px; padding: 14px; margin-bottom: 18px; border: 1px solid #c9dcd7; border-radius: 8px; background: #f3f8f6; }
+  .voice-use-bar > span { display: grid; gap: 4px; min-width: 0; }
+  .voice-use-bar small { color: #60706d; font-size: 12px; }
+  .voice-use-bar > div { display: flex; flex-wrap: wrap; gap: 8px; }
+  .voice-filter { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0 4px; }
+  .voice-filter button { min-height: 30px; border: 1px solid var(--border); border-radius: 999px; background: var(--card); padding: 0 14px; color: var(--muted-foreground); font-size: 12.5px; cursor: pointer; }
+  .voice-filter button.active { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-hover); font-weight: 650; }
+  .clone-state { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; margin-top: 8px; font-size: 12px; color: var(--muted-foreground); }
+  .clone-state strong { color: var(--warning); font-weight: 650; }
+  .clone-state.precise strong { color: var(--success); }
+  .clone-state em { flex-basis: 100%; color: var(--warning); font-style: normal; }
+  .clone-state button { border: 0; background: transparent; padding: 0; color: var(--accent-hover); font-size: 12px; text-decoration: underline; cursor: pointer; }
+</style>

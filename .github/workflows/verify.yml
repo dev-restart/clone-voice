@@ -1,0 +1,63 @@
+name: Verify studio
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: macos-14
+    timeout-minutes: 30
+    env:
+      CLONE_VOICE_VOXCPM_ENABLED: 'false'
+      CLONE_VOICE_SOULX_SINGER_ENABLED: 'false'
+      CLONE_VOICE_STABLE_AUDIO_SFX_ENABLED: 'false'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Install tools
+        run: |
+          brew install ffmpeg
+          npm install --global pnpm@10.33.0
+      - name: Check publication files
+        run: python3 scripts/check_release.py
+      - name: Check shell scripts
+        run: bash -n install.sh download-models.sh start.sh
+      - name: Install locked dependencies
+        run: |
+          cd backend
+          uv sync --frozen --extra dev
+          cd ../frontend
+          pnpm install --frozen-lockfile
+      - name: Backend tests
+        working-directory: backend
+        run: .venv/bin/python -m pytest -q
+      - name: Frontend checks and build
+        working-directory: frontend
+        run: |
+          pnpm run test:unit
+          pnpm run check
+          pnpm run build
+          pnpm run build-storybook
+      - name: Browser workflow checks
+        working-directory: frontend
+        run: |
+          pnpm exec playwright install chromium
+          pnpm run test:e2e

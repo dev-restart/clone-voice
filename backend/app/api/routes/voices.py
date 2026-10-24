@@ -3,79 +3,24 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
-from sqlalchemy import select
 
-from app.api.deps import get_content_store, get_router, get_voice_store
+from app.api.deps import get_voice_store
 from app.config import Settings, get_settings
-from app.db.models import DbConversionJob, DbSttJob
-from app.db.session import session_scope
 from app.schemas import (
-    ContentCreateRequest,
-    ContentGenerateRequest,
-    ContentItem,
-    ContentResult,
-    ContentUpdateRequest,
-    GenerateRequest,
-    GenerateResponse,
-    GenerationPreviewRequest,
-    GenerationPreviewResponse,
-    HealthResponse,
-    ModelListResponse,
-    ResultSaveVoiceRequest,
-    SmokeTestRequest,
-    SmokeTestResponse,
-    StorySegmentResult,
-    StoryStudioGenerateRequest,
-    StoryStudioGenerateResponse,
-    SpeechToSpeechResponse,
-    STTResponse,
-    TranslateRequest,
-    TranslateResponse,
-    TranscriptSegmentsResponse,
-    TTSRequest,
-    UploadedAudioResponse,
-    VoiceConversionJobItem,
-    VoiceConversionResponse,
     VoiceProfile,
+    VoiceProfileResponse,
     VoiceUpdateRequest,
-    YouTubeImportRequest,
-    YouTubeImportResponse,
     public_file_url,
 )
-from app.services.audio_effects import apply_output_effects
-from app.services.audio_utils import normalize_reference_audio, normalize_stt_audio, normalize_voice_conversion_audio
-from app.services.content_store import ContentStore
+from app.services.audio_utils import normalize_reference_audio
 from app.services.generation_helpers import (
-    build_generation_preview,
-    combine_generated_segments,
-    ensure_generated_audio,
-    narration_instruct,
-    parse_narration_script,
     public_audio_url,
-    requested_or_estimated_duration,
-    run_generation_with_progress,
-    transcribe_with_segments,
-    voice_with_reference_transcript,
 )
-from app.services.model_helpers import ensure_adapter_available
-from app.services.model_router import CapabilityUnsupportedError, ModelRouter, ModelUnavailableError
-from app.services.omnivoice_service import (
-    MockVoiceEngine,
-    OmniVoiceEngine,
-    combine_omnivoice_instruct,
-    effective_accent_for_language,
-    get_voice_engine,
-    language_code_to_omnivoice_language,
-)
-from app.services.progress import publish_progress
-from app.services.stt_service import STTProvider
-from app.services.translation_service import OpenAICompatibleTranslator
 from app.services.voice_store import VoiceStore
-from app.services.youtube_import_service import import_youtube_audio
 
 router = APIRouter()
 
-@router.get("/api/voices", response_model=list[VoiceProfile])
+@router.get("/api/voices", response_model=list[VoiceProfileResponse])
 def list_voices(settings: Settings = Depends(get_settings), store: VoiceStore = Depends(get_voice_store)):
     voices = store.list()
     for voice in voices:
@@ -84,7 +29,7 @@ def list_voices(settings: Settings = Depends(get_settings), store: VoiceStore = 
     return voices
 
 
-@router.post("/api/voices", response_model=VoiceProfile, status_code=201)
+@router.post("/api/voices", response_model=VoiceProfileResponse, status_code=201)
 async def create_voice(
     name: str = Form(...),
     transcript: str | None = Form(default=None),
@@ -125,7 +70,7 @@ async def create_voice(
     return store.save(voice)
 
 
-@router.get("/api/voices/{voice_id}", response_model=VoiceProfile)
+@router.get("/api/voices/{voice_id}", response_model=VoiceProfileResponse)
 def get_voice(voice_id: str, settings: Settings = Depends(get_settings), store: VoiceStore = Depends(get_voice_store)):
     voice = store.get(voice_id)
     if voice is None:
@@ -135,7 +80,7 @@ def get_voice(voice_id: str, settings: Settings = Depends(get_settings), store: 
     return voice
 
 
-@router.patch("/api/voices/{voice_id}", response_model=VoiceProfile)
+@router.patch("/api/voices/{voice_id}", response_model=VoiceProfileResponse)
 def update_voice(voice_id: str, request: VoiceUpdateRequest, settings: Settings = Depends(get_settings), store: VoiceStore = Depends(get_voice_store)):
     voice = store.get(voice_id)
     if voice is None:
@@ -169,7 +114,7 @@ def update_voice(voice_id: str, request: VoiceUpdateRequest, settings: Settings 
     return store.save(voice)
 
 
-@router.post("/api/voices/{voice_id}/avatar", response_model=VoiceProfile)
+@router.post("/api/voices/{voice_id}/avatar", response_model=VoiceProfileResponse)
 async def upload_voice_avatar(
     voice_id: str,
     avatar: UploadFile = File(...),

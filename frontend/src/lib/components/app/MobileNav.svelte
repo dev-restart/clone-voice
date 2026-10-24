@@ -1,12 +1,13 @@
 <script lang="ts">
+	import { t } from '$lib/i18n/index.svelte';
 	import type { MenuKey } from '$lib/studio/types';
-	import { studioMenus } from './navigation';
+	import { studioMenus, mainMenuKey } from './navigation';
 
-	let { active, onNavigate }: { active: MenuKey; onNavigate: (key: MenuKey) => void } = $props();
+	let { active, ready = true, showAuxiliaryTools = false, onNavigate }: { active: MenuKey; ready?: boolean; showAuxiliaryTools?: boolean; onNavigate: (key: MenuKey) => void } = $props();
 </script>
 
-<div class="studio-mobile-nav">
-	{#each studioMenus as item}
-		<button class:active={active === item.key} onclick={() => onNavigate(item.key)}>{item.label}</button>
+<nav class="studio-mobile-nav" aria-label={t('nav.ariaMobile')}>
+	{#each studioMenus.filter((item) => !item.auxiliary || showAuxiliaryTools) as item (item.key)}
+		<button disabled={!ready} class:active={mainMenuKey(active) === item.key} aria-current={mainMenuKey(active) === item.key ? 'page' : undefined} onclick={() => onNavigate(item.key)}>{t(item.labelKey)}</button>
 	{/each}
-</div>
+</nav>

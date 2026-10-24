@@ -1,0 +1,30 @@
+import { Meta } from '@storybook/addon-docs/blocks';
+
+<Meta title="Foundations/Introduction" />
+
+# Clone Voice Studio design system
+
+The studio UI is built from [shadcn-svelte](https://shadcn-svelte.com) components (Bits UI + Tailwind CSS v4) in
+`src/lib/components/ui`, plus a small set of studio components in `src/lib/components`. Every reusable piece has a story
+here so screens stay consistent.
+
+## Rules
+
+1. **Reach for a shadcn component first.** Add missing ones with `pnpm dlx shadcn-svelte@latest add <name>`; generated files
+   live in `src/lib/components/ui` and are not edited by hand (put variants in the story or wrap them).
+2. **Use semantic tokens**, not hex values: `bg-card`, `text-muted-foreground`, `border-border`, `text-brand`.
+   The palette lives in `:root` of `src/routes/layout.css`; the *Colors* story shows it.
+3. **Explain with a `?` popover, not paragraphs.** Put the one useful sentence in `HelpPopover` next to the control.
+   Do not add a visible helper line that repeats the label.
+4. **No hard-coded UI text.** Use `t('key')` and add the key to both `messages/ko` and `messages/en`
+   (`en` is type-checked against `ko`). Use the toolbar's language switch to review both.
+5. **Pick models with `ModelPicker`.** Every area (voice, music, cover, sound effects) uses the same control and the same
+   `models.ts` rules, so a new model only needs to be registered in the backend.
+
+## Run
+
+```bash
+cd frontend
+pnpm storybook        # http://localhost:6006
+pnpm build-storybook  # static build in storybook-static/
+```

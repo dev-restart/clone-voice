@@ -5,11 +5,15 @@
   "type": "module",
   "scripts": {
     "setup": "make setup",
+    "start": "make start",
     "dev": "make dev",
     "models": "make models",
+    "models:all": "make models-all",
     "check": "make check",
     "dev:backend": "make dev-backend",
-    "dev:frontend": "make dev-frontend"
+    "dev:frontend": "make dev-frontend",
+    "storybook": "make storybook",
+    "build-storybook": "make build-storybook"
   },
   "packageManager": "pnpm@10.33.0"
 }

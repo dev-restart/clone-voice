@@ -1,0 +1,22 @@
+export const production = {
+	'tpl.short-video.title': '짧은 영상',
+	'tpl.short-video.desc': '첫 문장으로 관심을 끄는 짧은 이야기',
+	'tpl.short-video.use': 'Shorts · Reels',
+	'tpl.short-video.text': '목소리만 바꿔도 영상의 분위기가 달라진다는 사실, 알고 계셨나요?\n\n같은 문장도 조금 천천히 읽으면 따뜻한 이야기가 되고, 빠르게 읽으면 생동감 있는 소개가 됩니다. 먼저 짧게 들어보고, 내 콘텐츠에 어울리는 속도를 찾아보세요.',
+	'tpl.course.title': '강의·튜토리얼',
+	'tpl.course.desc': '순서대로 설명하는 또렷한 내레이션',
+	'tpl.course.use': '강의 · 사용 설명',
+	'tpl.course.text': '이번 시간에는 대본으로 음성을 만드는 방법을 알아보겠습니다.\n\n먼저 전달할 내용을 짧은 문장으로 나눠 작성합니다. 다음으로 목소리와 속도를 선택합니다. 마지막으로 미리 듣기를 통해 발음과 문장 사이의 흐름을 확인합니다.\n\n준비가 되셨다면 첫 번째 문장부터 함께 만들어 보겠습니다.',
+	'tpl.product.title': '제품·서비스 소개',
+	'tpl.product.desc': '필요한 순간부터 사용 방법까지',
+	'tpl.product.use': '서비스 소개 · 데모',
+	'tpl.product.text': '영상에 내 목소리를 담고 싶은데 녹음할 시간이 부족한가요?\n\nClone Voice에서 대본을 작성하고 등록한 목소리를 골라 보세요. 자주 쓰는 브랜드명은 발음 사전에 저장하고, 미리 듣기로 확인할 수 있습니다.\n\n완성된 음성을 내려받아 영상 편집에 사용하세요.',
+	'tpl.announcement.title': '안내방송',
+	'tpl.announcement.desc': '시간과 행동을 분명하게 전달하는 안내',
+	'tpl.announcement.use': '행사 · 매장 · 공지',
+	'tpl.announcement.text': '안내 말씀드립니다. 잠시 후 행사가 시작됩니다.\n\n참석하신 분들은 입구에서 예약 내역을 확인한 뒤 지정된 좌석에 앉아 주세요. 도움이 필요하시면 가까운 안내 직원에게 말씀해 주세요.\n\n편안하고 즐거운 시간 보내시기 바랍니다. 감사합니다.',
+	'prod.error.tooMany': '발음은 대본마다 최대 100개까지 등록할 수 있습니다.',
+	'prod.error.incomplete': '단어와 읽는 법을 모두 입력하거나 빈 항목을 지워 주세요.',
+	'prod.error.length': '발음 항목의 길이를 줄이고 태그나 줄바꿈을 빼 주세요.',
+	'prod.error.duplicate': '같은 언어의 같은 단어는 한 번만 등록해 주세요.'
+} as const;

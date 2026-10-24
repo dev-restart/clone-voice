@@ -1,21 +1,25 @@
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
-DEFAULT_REGISTERED_MODELS = ("omnivoice", "voxcpm", "cosyvoice", "seed-vc")
+DEFAULT_REGISTERED_MODELS = ("voxcpm", "soulx-singer", "stable-audio-sfx")
 
 
 class Settings(BaseSettings):
     app_name: str = "Clone Voice Studio"
     storage_dir: Path = Field(default=Path("storage"))
+    # Downloaded model weights (Hugging Face cache, Whisper). Ignored by Git.
+    models_dir: Path = Field(default=Path("models"))
     voice_dir: Path | None = None
     upload_dir: Path | None = None
     output_dir: Path | None = None
     content_dir: Path | None = None
+    media_import_cookie_file: Path | None = None
+    media_import_max_duration_seconds: int = Field(default=3600, ge=60, le=86400)
     database_url: str | None = None
     cors_origins: list[str] = Field(
         default_factory=lambda: [
@@ -52,32 +56,49 @@ class Settings(BaseSettings):
     cosyvoice_device: str = "auto"
     cosyvoice_sample_rate: int = 24000
     cosyvoice_timeout_seconds: int = 1800
-    seed_vc_enabled: bool = False
-    seed_vc_repo_dir: Path = Field(default=Path("vendor/seed-vc"))
-    seed_vc_python: str | None = None
-    seed_vc_device: str = "mps"
-    seed_vc_diffusion_steps: int = 25
-    seed_vc_length_adjust: float = 1.0
-    seed_vc_inference_cfg_rate: float = 0.7
-    seed_vc_f0_condition: bool = False
-    seed_vc_auto_f0_adjust: bool = False
-    seed_vc_semi_tone_shift: int = 0
-    seed_vc_fp16: bool = True
-    seed_vc_checkpoint: str | None = None
-    seed_vc_config: str | None = None
-    seed_vc_v2_ar_checkpoint: str | None = None
-    seed_vc_v2_cfm_checkpoint: str | None = None
-    seed_vc_timeout_seconds: int = 1800
-    registered_models: list[str] = Field(default_factory=lambda: list(DEFAULT_REGISTERED_MODELS))
-    default_tts_model: str = "omnivoice"
-    default_vc_model: str = "seed-vc"
+    # Experimental second TTS engine. Off by default and not in DEFAULT_REGISTERED_MODELS; it needs its
+    # own venv (qwen-tts pins transformers==4.57.3).
+    qwen3_tts_enabled: bool = False
+    qwen3_tts_python: str | None = None
+    qwen3_tts_model_id: str = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
+    qwen3_tts_device: str = "auto"
+    qwen3_tts_dtype: str = "float32"
+    qwen3_tts_cache_dir: Path | None = None  # falls back to voxcpm_cache_dir
+    qwen3_tts_local_files_only: bool = False
+    qwen3_tts_timeout_seconds: int = 900
+    soulx_singer_enabled: bool = False
+    soulx_singer_repo_dir: Path = Field(default=Path("vendor/SoulX-Singer-MLX"))
+    soulx_singer_python: str | None = None
+    soulx_singer_model_dir: Path = Field(default=Path("models/SoulX-Singer-bf16"))
+    soulx_singer_preprocess_model_dir: Path = Field(default=Path("pretrained_models/SoulX-Singer-Preprocess"))
+    soulx_singer_whisper_model_dir: Path = Field(default=Path("pretrained_models/openai__whisper-base"))
+    soulx_singer_device: str = "mps"
+    soulx_singer_steps: int = 4
+    soulx_singer_cfg_scale: float = 2.0
+    soulx_singer_separate_vocals: bool = True
+    soulx_singer_mix_accompaniment: bool = True
+    soulx_singer_timeout_seconds: int = 3600
+    stable_audio_sfx_enabled: bool = False
+    stable_audio_repo_dir: Path = Field(default=Path("vendor/stable-audio-3"))
+    stable_audio_python: str | None = None
+    stable_audio_timeout_seconds: int = 300
+    registered_models: Annotated[list[str], NoDecode] = Field(default_factory=lambda: list(DEFAULT_REGISTERED_MODELS))
+    default_tts_model: str = "voxcpm"
+    default_vc_model: str = "soulx-singer"
+    default_sfx_model: str = "stable-audio-sfx"
+    default_music_model: str = ""
     whisper_model: str = "base"
     apple_speech_require_on_device: bool = True
     apple_speech_timeout_seconds: int = 180
     llm_base_url: str = "http://127.0.0.1:11434/v1"
-    llm_model: str = "translategemma:12b"
+    llm_model: str = "qwen3:4b"
     llm_api_key: str = "ollama"
     llm_timeout_seconds: int = 120
+    apple_intelligence_timeout_seconds: int = Field(default=120, ge=5, le=600)
+    ai_text_settings_path: Path | None = None
+    codex_cli_bin: str = "codex"
+    kimi_cli_bin: str = "kimi"
+    ai_cli_timeout_seconds: int = 120
 
     model_config = SettingsConfigDict(env_file=".env", env_prefix="CLONE_VOICE_")
 
@@ -93,10 +114,14 @@ class Settings(BaseSettings):
         "upload_dir",
         "output_dir",
         "content_dir",
+        "media_import_cookie_file",
         "cosyvoice_python",
         "cosyvoice_default_spk_id",
         "cosyvoice_prompt_wav",
         "cosyvoice_prompt_text",
+        "soulx_singer_python",
+        "stable_audio_python",
+        "ai_text_settings_path",
         mode="before",
     )
     @classmethod
@@ -119,9 +144,7 @@ class Settings(BaseSettings):
         else:
             raise ValueError("registered_models must be a comma-separated string or list")
 
-        unknown = sorted(set(values) - set(DEFAULT_REGISTERED_MODELS))
-        if unknown:
-            raise ValueError(f"Unknown registered model id: {', '.join(unknown)}")
+        # Ids are checked against the adapter registry in ModelRouter, where plugins have already registered.
         return values or list(DEFAULT_REGISTERED_MODELS)
 
     @property
@@ -157,10 +180,17 @@ class Settings(BaseSettings):
     def contents_dir(self) -> Path:
         return self.content_dir or (self.storage_dir / "contents")
 
+    @property
+    def resolved_ai_text_settings_path(self) -> Path:
+        return self.ai_text_settings_path or (self.storage_dir / "ai_text_settings.json")
+
 
 @lru_cache
 def get_settings() -> Settings:
     settings = Settings()
     for directory in (settings.voices_dir, settings.outputs_dir, settings.uploads_dir, settings.contents_dir):
         directory.mkdir(parents=True, exist_ok=True)
+    from app.model_cache import resolve_voxcpm_cache_dir
+
+    settings.voxcpm_cache_dir = resolve_voxcpm_cache_dir(settings)
     return settings

@@ -12,12 +12,22 @@ from app.schemas import ModelStatus, VoiceProfile
 
 VOXCPM_SAMPLE_RATE = 48000
 _OMNIVOICE_DEFAULT_STEPS = 32
+_VOXCPM_KOREAN_AUDIO_TEXT_RATIO_THRESHOLD = 10.0
 
 _KOREAN_CONTROL_PROMPTS = {
+    "친절한 상담원": "friendly customer service voice",
     "차분하게": "calm and steady tone",
+    "차분하고 자연스럽게": "calm and natural tone",
     "조금 빠르게": "slightly faster pace",
     "밝고 친근하게": "warm and friendly tone",
     "밝게": "bright tone",
+    "기쁘게": "happy and lively tone",
+    "흥미진진하게": "excited and engaging tone",
+    "긴장감 있게": "tense and suspenseful tone",
+    "진지하게": "serious and composed tone",
+    "부드럽게": "soft and gentle tone",
+    "속삭이듯": "soft whispering tone",
+    "놀란 듯이": "surprised tone",
     "이쁘게": "pretty and charming tone",
     "예쁘게": "pretty and charming tone",
     "섹시하게": "soft and alluring tone",
@@ -27,6 +37,7 @@ _KOREAN_CONTROL_PROMPTS = {
     "슬픈 톤": "sad and low tone",
     "저음으로": "low pitch",
     "뉴스 앵커처럼": "news anchor style",
+    "유튜브홍보영상 스타일로": "energetic promotional video narration",
 }
 
 
@@ -57,14 +68,10 @@ def build_voxcpm_control_prompt(
 
     if accent and accent.strip():
         prompts.append(accent.strip())
-    elif language and language.strip().lower() == "ko":
-        prompts.append("natural Korean pronunciation")
 
-    if speed is not None:
-        if speed >= 1.15:
-            prompts.append("slightly faster pace")
-        elif speed <= 0.85:
-            prompts.append("slightly slower pace")
+    # speed는 생성 후 time-stretch로 한 번만 적용합니다. 프롬프트에 속도 문구를 넣으면 이중 적용되고,
+    # 제어 문구가 생기는 순간 전사문 기반 고충실도 복제(ultimate cloning)가 꺼집니다.
+    del speed
 
     deduped: list[str] = []
     seen: set[str] = set()
@@ -101,8 +108,17 @@ def normalize_voxcpm_target_text(text: str) -> str:
 
 def apply_voxcpm_control_prefix(text: str, instruct: str | None) -> str:
     target_text = normalize_voxcpm_target_text(text)
-    control = re.sub(r"\s+", " ", instruct or "").strip()
-    return f"({control}){target_text}" if control else target_text
+    control = re.sub(r"[()（）]", "", instruct or "").strip()
+    if not control:
+        return target_text
+    return f"({control}){target_text}"
+
+
+def voxcpm_audio_text_ratio_threshold(language: str | None, text: str) -> float:
+    normalized_language = (language or "").strip().lower()
+    if normalized_language in {"ko", "kr", "kor", "korean", "한국어"} or re.search(r"[가-힣]", text):
+        return _VOXCPM_KOREAN_AUDIO_TEXT_RATIO_THRESHOLD
+    return 6.0
 
 
 class VoxCPMEngine:
@@ -149,11 +165,11 @@ class VoxCPMEngine:
     ) -> tuple[Path, float | None]:
         del duration, position_temperature, class_temperature, postprocess_output, audio_chunk_duration, audio_chunk_threshold
         model = self._ensure_model()
-        # VoxCPM exposes the target utterance as a single `text` argument. Do not
-        # accept a separate control-prompt parameter. Its CLI applies style
-        # control by prefixing `(control instruction)` to the target text, so the
-        # adapter mirrors that behavior instead of dropping tone/style metadata.
+        # VoxCPM2 officially accepts style control as a parenthesized prefix on
+        # target text. Ultimate cloning uses prompt audio/text instead, so a
+        # controlled line stays in reference-only cloning mode.
         control_prompt = instruct
+        ratio_threshold = voxcpm_audio_text_ratio_threshold(language, text)
         del language, speed
         kwargs: dict[str, object] = {
             "text": apply_voxcpm_control_prefix(text, control_prompt),
@@ -162,12 +178,13 @@ class VoxCPMEngine:
             "max_len": self.settings.voxcpm_max_len,
             "normalize": preprocess_prompt,
             "denoise": denoise,
+            "retry_badcase_ratio_threshold": ratio_threshold,
         }
 
         if voice is not None:
             reference_path = str(Path(voice.audio_path).resolve())
             kwargs["reference_wav_path"] = reference_path
-            if voice.transcript:
+            if voice.transcript and not control_prompt:
                 kwargs["prompt_wav_path"] = reference_path
                 kwargs["prompt_text"] = voice.transcript
 

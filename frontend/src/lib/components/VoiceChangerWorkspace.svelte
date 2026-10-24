@@ -1,23 +1,36 @@
 <script lang="ts">
+	import { i18n, t } from '$lib/i18n/index.svelte';
 	import { browser } from '$app/environment';
 	import { onDestroy, onMount, tick } from 'svelte';
-	import { ArrowLeft, FileAudio, Loader2, Mic, Pause, Play, RotateCcw, Wand2 } from 'lucide-svelte';
+	import { ArrowLeft, FileAudio, Link2, Loader2, Pause, Play, RotateCcw, Wand2 } from '@lucide/svelte';
 	import WaveSurfer from 'wavesurfer.js';
 	import RegionsPlugin from 'wavesurfer.js/dist/plugins/regions.esm.js';
+	import HelpPopover from '$lib/components/HelpPopover.svelte';
 	import { apiFetch, apiWebSocketUrl, audioUrl, formatTime } from '$lib/studio/api';
 	import ProgressPanel from '$lib/components/app/ProgressPanel.svelte';
+	import ProductionAssistPanel from '$lib/components/app/ProductionAssistPanel.svelte';
+	import type { ProductionAssistResponse } from '$lib/studio/ai-prompts';
 	import VoiceChangerProjectList from '$lib/components/conversion/VoiceChangerProjectList.svelte';
 	import VoiceChangerResultsPanel from '$lib/components/conversion/VoiceChangerResultsPanel.svelte';
 	import VoiceChangerSettingsPanel from '$lib/components/conversion/VoiceChangerSettingsPanel.svelte';
+	import AudioDownload from '$lib/components/AudioDownload.svelte';
 	import type { RuntimeModelStatus, VoiceConversionJob, VoiceProfile } from '$lib/studio/types';
 
 	let {
 		voices,
 		models,
+		defaultVcModelId = 'soulx-singer',
+		defaultSttProvider = 'apple-speech',
+		defaultVoiceId = '',
+		startWithVoice = false,
 		onNotice
 	}: {
 		voices: VoiceProfile[];
 		models: RuntimeModelStatus[];
+		defaultVcModelId?: string;
+		defaultSttProvider?: 'apple-speech' | 'whisper';
+		defaultVoiceId?: string;
+		startWithVoice?: boolean;
 		onNotice: (type: 'success' | 'error' | 'info', text: string) => void;
 	} = $props();
 
@@ -26,14 +39,17 @@
 		title: string;
 		voice_id: string;
 		model_id: string;
-		conversion_mode?: 'voice' | 'singing' | 'v2';
-		diffusion_steps?: number;
-		length_adjust?: number;
-		inference_cfg_rate?: number;
-		f0_condition?: boolean;
-		auto_f0_adjust?: boolean;
-		semi_tone_shift?: number;
-		fp16?: boolean;
+		quality?: 'fast' | 'balanced' | 'quality';
+		cfg_scale?: number;
+		auto_shift?: boolean;
+		pitch_shift?: number;
+		separate_vocals?: boolean;
+		mix_accompaniment?: boolean;
+		seed?: number;
+		source_origin?: 'file' | 'youtube' | 'instagram';
+		source_page_url?: string | null;
+		source_title?: string | null;
+		source_duration_seconds?: number | null;
 		source_audio_url?: string | null;
 		source_audio_name?: string | null;
 		transcript?: string | null;
@@ -50,25 +66,22 @@
 	let title = $state('');
 	let file = $state<File | null>(null);
 	let voiceId = $state('');
-	let modelId = $state('seed-vc');
-	let conversionMode = $state<'voice' | 'singing' | 'v2'>('singing');
-	let diffusionSteps = $state(40);
-	let lengthAdjust = $state(1.0);
-	let inferenceCfgRate = $state(0.7);
-	let f0Condition = $state(true);
-	let autoF0Adjust = $state(true);
-	let semiToneShift = $state(0);
-	let fp16 = $state(true);
-	let sttProvider = $state<'whisper' | 'apple-speech'>('whisper');
+	let modelId = $state('');
+	let quality = $state<'fast' | 'balanced' | 'quality'>('balanced');
+	let cfgScale = $state(2.0);
+	let autoShift = $state(true);
+	let pitchShift = $state(0);
+	let separateVocals = $state(true);
+	let mixAccompaniment = $state(true);
+	let seed = $state(42);
+	let sttProvider = $state<'whisper' | 'apple-speech'>('apple-speech');
 	let sttLanguage = $state('ko');
 	let busy = $state(false);
-	let realtimeLaunching = $state(false);
-	let realtimeStatus = $state<{ state: 'idle' | 'launching' | 'running' | 'error'; message: string; pid?: number | null }>({
-		state: 'idle',
-		message: ''
-	});
 	let transcribing = $state(false);
 	let savingSource = $state(false);
+	let importingMedia = $state(false);
+	let mediaUrl = $state('');
+	let mediaImportError = $state('');
 	let outputUrl = $state('');
 	let history = $state<VoiceConversionJob[]>([]);
 	let projectVersions = $state<VoiceConversionJob[]>([]);
@@ -81,18 +94,18 @@
 	let wave: WaveSurfer | null = null;
 	let regions: ReturnType<typeof RegionsPlugin.create> | null = null;
 	let activeRegion: any = null;
-	let recording = $state(false);
-	let recordingSeconds = $state(0);
-	let recordingTimer: ReturnType<typeof setInterval> | null = null;
-	let recordingStream: MediaStream | null = null;
 	let progress = $state({ percent: 0, message: '', elapsed: 0, active: false });
-	let recorder: MediaRecorder | null = null;
-	let chunks: Blob[] = [];
 	let vcModels = $derived(models.filter((model) => model.capabilities.voice_conversion));
+	let selectedVoiceId = $derived(voiceId);
+	let selectedVoice = $derived(voices.find((voice) => voice.id === selectedVoiceId));
+	let selectedProject = $derived(projects.find((project) => project.id === selectedProjectId) ?? null);
 	let selectedModel = $derived(vcModels.find((model) => model.id === modelId));
 	let selectedDuration = $derived(Math.max(0, trimEnd - trimStart));
 	let selectionTooShort = $derived(previewUrl && selectedDuration < 1);
-	let canConvert = $derived(Boolean(file && voiceId && selectedModel?.status === 'available' && !selectionTooShort));
+	let canConvert = $derived(
+		Boolean(file && selectedVoiceId && selectedModel?.status === 'available' && !selectionTooShort && !savingSource && !importingMedia)
+	);
+	let generationSteps = $derived(quality === 'fast' ? 2 : quality === 'quality' ? 8 : 4);
 	let timelineTicks = $derived.by(() => {
 		if (!duration) return [];
 		const segments = Math.min(8, Math.max(2, Math.ceil(duration)));
@@ -100,32 +113,18 @@
 	});
 
 	onMount(() => {
+		sttProvider = defaultSttProvider;
+		modelId = vcModels.find((model) => model.id === defaultVcModelId)?.id ?? vcModels[0]?.id ?? 'soulx-singer';
 		projects = loadProjects();
+		voiceId = voices.some((voice) => voice.id === defaultVoiceId) ? defaultVoiceId : '';
+		if (startWithVoice) startNew();
 		void loadHistory();
 	});
 
 	onDestroy(() => {
 		wave?.destroy();
 		if (previewUrl) URL.revokeObjectURL(previewUrl);
-		clearRecordingTimer();
-		recordingStream?.getTracks().forEach((track) => track.stop());
 	});
-
-	$effect(() => {
-		if (!voiceId && voices.length) voiceId = voices[0].id;
-	});
-
-	$effect(() => {
-		if (vcModels.length && !vcModels.some((model) => model.id === modelId)) {
-			modelId = vcModels[0].id;
-		}
-	});
-
-	function clearRecordingTimer() {
-		if (!recordingTimer) return;
-		clearInterval(recordingTimer);
-		recordingTimer = null;
-	}
 
 	function loadProjects() {
 		if (!browser) return [];
@@ -146,17 +145,20 @@
 		const now = new Date().toISOString();
 		return {
 			id: crypto.randomUUID(),
-			title: `새 보이스 체인저 ${new Date().toLocaleString('ko-KR', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`,
-			voice_id: voiceId,
+			title: t('cover.newTitle', { time: new Date().toLocaleString(i18n.intl, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) }),
+			voice_id: selectedVoiceId,
 			model_id: modelId,
-			conversion_mode: conversionMode,
-			diffusion_steps: diffusionSteps,
-			length_adjust: lengthAdjust,
-			inference_cfg_rate: inferenceCfgRate,
-			f0_condition: f0Condition,
-			auto_f0_adjust: autoF0Adjust,
-			semi_tone_shift: semiToneShift,
-			fp16,
+			quality,
+			cfg_scale: cfgScale,
+			auto_shift: autoShift,
+			pitch_shift: pitchShift,
+			separate_vocals: separateVocals,
+			mix_accompaniment: mixAccompaniment,
+			seed,
+			source_origin: 'file',
+			source_page_url: null,
+			source_title: null,
+			source_duration_seconds: null,
 			source_audio_url: null,
 			source_audio_name: null,
 			transcript: '',
@@ -167,6 +169,8 @@
 	}
 
 	function startNew() {
+		voiceId = voices.some((voice) => voice.id === defaultVoiceId) ? defaultVoiceId : '';
+		modelId = vcModels.find((model) => model.id === defaultVcModelId)?.id ?? vcModels[0]?.id ?? 'soulx-singer';
 		const project = createProject();
 		const nextProjects = [project, ...projects];
 		projects = nextProjects;
@@ -180,18 +184,21 @@
 		selectedProjectId = project.id;
 		title = project.title;
 		voiceId = project.voice_id || voiceId;
-		modelId = project.model_id || modelId;
-		conversionMode = project.conversion_mode || 'singing';
-		diffusionSteps = project.diffusion_steps ?? (conversionMode === 'singing' ? 40 : 25);
-		lengthAdjust = project.length_adjust ?? 1.0;
-		inferenceCfgRate = project.inference_cfg_rate ?? 0.7;
-		f0Condition = project.f0_condition ?? conversionMode === 'singing';
-		autoF0Adjust = project.auto_f0_adjust ?? conversionMode === 'singing';
-		semiToneShift = project.semi_tone_shift ?? 0;
-		fp16 = project.fp16 ?? true;
+		modelId = vcModels.some((model) => model.id === project.model_id)
+			? project.model_id
+			: vcModels.find((model) => model.id === defaultVcModelId)?.id ?? vcModels[0]?.id ?? 'soulx-singer';
+		quality = project.quality ?? 'balanced';
+		cfgScale = project.cfg_scale ?? 2.0;
+		autoShift = project.auto_shift ?? true;
+		pitchShift = project.pitch_shift ?? 0;
+		separateVocals = project.separate_vocals ?? true;
+		mixAccompaniment = project.mix_accompaniment ?? true;
+		seed = project.seed ?? 42;
 		transcript = project.transcript ?? '';
 		projectVersions = project.versions ?? [];
 		outputUrl = projectVersions[0]?.output_audio_url ?? '';
+		mediaUrl = project.source_page_url ?? '';
+		mediaImportError = '';
 		mode = 'detail';
 		void restoreSourceFromProject(project);
 	}
@@ -203,16 +210,19 @@
 			...current,
 			id: selectedProjectId,
 			title: title.trim() || current.title,
-			voice_id: voiceId,
+			voice_id: selectedVoiceId,
 			model_id: modelId,
-			conversion_mode: conversionMode,
-			diffusion_steps: diffusionSteps,
-			length_adjust: lengthAdjust,
-			inference_cfg_rate: inferenceCfgRate,
-			f0_condition: f0Condition,
-			auto_f0_adjust: autoF0Adjust,
-			semi_tone_shift: semiToneShift,
-			fp16,
+			quality,
+			cfg_scale: cfgScale,
+			auto_shift: autoShift,
+			pitch_shift: pitchShift,
+			separate_vocals: separateVocals,
+			mix_accompaniment: mixAccompaniment,
+			seed,
+			source_origin: current.source_origin ?? 'file',
+			source_page_url: current.source_page_url ?? null,
+			source_title: current.source_title ?? null,
+			source_duration_seconds: current.source_duration_seconds ?? null,
 			source_audio_url: current.source_audio_url ?? null,
 			source_audio_name: current.source_audio_name ?? null,
 			transcript,
@@ -232,7 +242,7 @@
 
 	function deleteProject(id: string) {
 		const project = projects.find((item) => item.id === id);
-		if (!project || !window.confirm(`'${project.title}' 작업을 삭제할까요?`)) return;
+		if (!project || !window.confirm(t('cover.confirmDelete', { title: project.title }))) return;
 		const nextProjects = projects.filter((item) => item.id !== id);
 		projects = nextProjects;
 		persistProjects(nextProjects);
@@ -242,10 +252,11 @@
 			outputUrl = '';
 			mode = 'list';
 		}
-		onNotice('success', '보이스 체인저 작업을 삭제했습니다.');
+		onNotice('success', t('cover.deleted'));
 	}
 
 	function sourceUrlFromJob(job?: VoiceConversionJob) {
+		if (job?.source_audio_url) return job.source_audio_url;
 		if (!job?.source_audio_path) return '';
 		const filename = job.source_audio_path.split('/').pop();
 		return filename ? `/api/files/uploads/${filename}` : '';
@@ -269,13 +280,40 @@
 			const response = await fetch(audioUrl(sourceUrl));
 			if (!response.ok) return;
 			const blob = await response.blob();
-			file = new File([blob], project.source_audio_name || sourceUrl.split('/').pop() || 'voice-change-source.wav', { type: blob.type || 'audio/wav' });
-			if (previewUrl) URL.revokeObjectURL(previewUrl);
-			previewUrl = URL.createObjectURL(file);
-			await setupWaveform(previewUrl);
+			await setSourcePreview(
+				new File([blob], project.source_audio_name || sourceUrl.split('/').pop() || 'voice-change-source.wav', { type: blob.type || 'audio/wav' })
+			);
 		} catch {
 			// Existing conversion result can still be played even if the source file cannot be restored.
 		}
+	}
+
+	async function setSourcePreview(sourceFile: File) {
+		file = sourceFile;
+		if (previewUrl) URL.revokeObjectURL(previewUrl);
+		previewUrl = URL.createObjectURL(sourceFile);
+		await setupWaveform(previewUrl);
+	}
+
+	async function applySourceFile(
+		sourceFile: File,
+		projectPatch: Partial<VoiceChangerProject> = {},
+		options: { titleCandidate?: string | null } = {}
+	) {
+		await setSourcePreview(sourceFile);
+		if (!title.trim() || (title.startsWith(t('cover.newTitlePrefix')) || title.startsWith('새 노래 커버 ') || title.startsWith('새 AI 커버 ') || title.startsWith('New song cover '))) {
+			const nextTitle = options.titleCandidate?.trim() || sourceFile.name.replace(/\.[^.]+$/, '');
+			if (nextTitle) title = nextTitle;
+		}
+		transcript = '';
+		outputUrl = '';
+		projectVersions = [];
+		saveCurrentProject({
+			source_audio_name: projectPatch.source_audio_name ?? sourceFile.name,
+			transcript: '',
+			versions: [],
+			...projectPatch
+		});
 	}
 
 	async function persistSourceFile(sourceFile: File) {
@@ -291,7 +329,7 @@
 				transcript,
 				versions: []
 			});
-			onNotice('success', '원본 음성을 작업에 저장했습니다.');
+			onNotice('success', t('cover.sourceSaved'));
 		} catch (error) {
 			onNotice('error', error instanceof Error ? error.message : String(error));
 		} finally {
@@ -343,66 +381,76 @@
 		wave.load(url);
 	}
 
-	function onFileChange(event: Event) {
-		file = (event.target as HTMLInputElement).files?.[0] ?? null;
-		if (!file) return;
-		if (previewUrl) URL.revokeObjectURL(previewUrl);
-		previewUrl = URL.createObjectURL(file);
-		void setupWaveform(previewUrl);
-		if (!title.trim()) title = file.name.replace(/\.[^.]+$/, '');
-		transcript = '';
-		outputUrl = '';
-		projectVersions = [];
-		saveCurrentProject({ source_audio_url: null, source_audio_name: file.name, transcript, versions: [] });
-		void persistSourceFile(file);
-	}
-
-	async function toggleRecord() {
-		if (recording) {
-			recorder?.stop();
+	async function importMediaSource() {
+		if (!mediaUrl.trim()) {
+			mediaImportError = t('cover.needUrl');
 			return;
 		}
+		importingMedia = true;
+		mediaImportError = '';
 		try {
-			const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-			recordingStream = stream;
-			chunks = [];
-			recorder = new MediaRecorder(stream, { mimeType: MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : undefined });
-			recorder.ondataavailable = (event) => {
-				if (event.data.size) chunks.push(event.data);
-			};
-			recorder.onstop = () => {
-				clearRecordingTimer();
-				stream.getTracks().forEach((track) => track.stop());
-				recordingStream = null;
-				file = new File([new Blob(chunks, { type: 'audio/webm' })], `voice-change-${Date.now()}.webm`, { type: 'audio/webm' });
-				if (previewUrl) URL.revokeObjectURL(previewUrl);
-				previewUrl = URL.createObjectURL(file);
-				recording = false;
-				void setupWaveform(previewUrl);
-				if (!title.trim()) title = '녹음 보이스 체인저';
-				transcript = '';
-				outputUrl = '';
-				projectVersions = [];
-				saveCurrentProject({ source_audio_url: null, source_audio_name: file.name, transcript, versions: [] });
-				void persistSourceFile(file);
-			};
-			recorder.start(250);
-			recordingSeconds = 0;
-			recordingTimer = setInterval(() => {
-				recordingSeconds += 1;
-			}, 1000);
-			recording = true;
+			const response = await apiFetch('/api/audio/media-import', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ url: mediaUrl.trim(), isolate_voice: false })
+			});
+			const payload: {
+				platform: 'youtube' | 'instagram';
+				title: string;
+				webpage_url: string;
+				duration_seconds?: number | null;
+				audio_url: string;
+				filename: string;
+			} = await response.json();
+			const sourceResponse = await fetch(audioUrl(payload.audio_url));
+			if (!sourceResponse.ok) {
+				throw new Error(t('cover.openFail'));
+			}
+			const blob = await sourceResponse.blob();
+			const importedFile = new File([blob], payload.filename || 'cover-source.wav', { type: blob.type || 'audio/wav' });
+			await applySourceFile(
+				importedFile,
+				{
+					source_origin: payload.platform,
+					source_page_url: payload.webpage_url,
+					source_title: payload.title,
+					source_duration_seconds: payload.duration_seconds ?? null,
+					source_audio_url: payload.audio_url,
+					source_audio_name: payload.filename || importedFile.name
+				},
+				{ titleCandidate: payload.title }
+			);
+			onNotice('success', t('cover.imported'));
 		} catch (error) {
-			clearRecordingTimer();
-			recordingStream?.getTracks().forEach((track) => track.stop());
-			recordingStream = null;
-			onNotice('error', error instanceof Error ? error.message : String(error));
+			mediaImportError = error instanceof Error ? error.message : String(error);
+			onNotice('error', mediaImportError);
+		} finally {
+			importingMedia = false;
 		}
+	}
+
+	async function onFileChange(event: Event) {
+		const sourceFile = (event.target as HTMLInputElement).files?.[0] ?? null;
+		if (!sourceFile) return;
+		mediaImportError = '';
+		await applySourceFile(
+			sourceFile,
+			{
+				source_origin: 'file',
+				source_page_url: null,
+				source_title: null,
+				source_duration_seconds: null,
+				source_audio_url: null,
+				source_audio_name: sourceFile.name
+			},
+			{ titleCandidate: sourceFile.name.replace(/\.[^.]+$/, '') }
+		);
+		await persistSourceFile(sourceFile);
 	}
 
 	function watchProgress(progressId: string) {
 		let elapsed = 0;
-		progress = { percent: 1, message: '변환 작업을 준비하고 있습니다.', elapsed, active: true };
+		progress = { percent: 1, message: t('cover.preparing'), elapsed, active: true };
 		const timer = window.setInterval(() => {
 			elapsed += 1;
 			progress = { ...progress, elapsed };
@@ -425,7 +473,7 @@
 				active: !payload.done
 			};
 			if (payload.done) {
-				finish(payload.message ?? '보이스 체인저 변환이 완료되었습니다.');
+				finish(payload.message ?? t('cover.done'));
 			}
 		};
 		return (doneMessage?: string) => {
@@ -451,7 +499,7 @@
 
 	async function transcribeSource() {
 		if (!file) {
-			onNotice('error', '대본을 읽을 원본 음성이 필요합니다.');
+			onNotice('error', t('cover.needSongLyrics'));
 			return;
 		}
 		transcribing = true;
@@ -466,7 +514,7 @@
 			const payload = await response.json();
 			transcript = payload.text ?? '';
 			saveCurrentProject({ transcript });
-			onNotice('success', `${sttProvider === 'apple-speech' ? 'Apple Speech' : 'Whisper'}로 원본 음성 대본을 읽었습니다.`);
+			onNotice('success', t('cover.lyricsDone', { engine: sttProvider === 'apple-speech' ? 'Apple Speech' : 'Whisper' }));
 		} catch (error) {
 			onNotice('error', error instanceof Error ? error.message : String(error));
 		} finally {
@@ -474,21 +522,40 @@
 		}
 	}
 
+	function applyCoverRecommendation(result: ProductionAssistResponse) {
+		if (!selectedProjectId || busy || savingSource || importingMedia || transcribing) throw new Error(t('cover.applyState'));
+		if (result.kind !== 'cover' || !result.settings) throw new Error(t('cover.noSettings'));
+		const settings = result.settings;
+		const previous = { quality, cfgScale, pitchShift, autoShift, separateVocals, mixAccompaniment, projects };
+		try {
+			quality = settings.quality;
+			cfgScale = settings.cfg_scale;
+			pitchShift = settings.pitch_shift;
+			autoShift = settings.auto_shift;
+			separateVocals = settings.separate_vocals;
+			mixAccompaniment = settings.mix_accompaniment && settings.separate_vocals;
+			saveCurrentProject();
+		} catch {
+			({ quality, cfgScale, pitchShift, autoShift, separateVocals, mixAccompaniment, projects } = previous);
+			throw new Error(t('cover.applyFail'));
+		}
+	}
+
 	async function convert() {
 		if (!file) {
-			onNotice('error', '변환할 원본 음성이 필요합니다.');
+			onNotice('error', t('cover.needSong'));
 			return;
 		}
-		if (!voiceId) {
-			onNotice('error', '대상 목소리를 선택해 주세요.');
+		if (!selectedVoiceId) {
+			onNotice('error', t('cover.needVoice'));
 			return;
 		}
 		if (selectionTooShort) {
-			onNotice('error', '선택 구간이 너무 짧습니다. 말소리가 있는 구간을 선택해 주세요.');
+			onNotice('error', t('cover.tooShort'));
 			return;
 		}
 		if (selectedModel?.status !== 'available') {
-			onNotice('error', selectedModel?.message || 'Seed-VC 모델을 사용할 수 없습니다.');
+			onNotice('error', selectedModel?.message || t('cover.modelUnavailable'));
 			return;
 		}
 		const progressId = crypto.randomUUID();
@@ -497,31 +564,51 @@
 		try {
 			const form = new FormData();
 			form.append('audio', file);
-			form.append('voice_id', voiceId);
+			form.append('voice_id', selectedVoiceId);
 			form.append('model_id', modelId);
 			form.append('progress_id', progressId);
 			form.append('trim_start', String(trimStart));
 			form.append('trim_end', String(trimEnd));
-			form.append('conversion_mode', conversionMode);
-			form.append('diffusion_steps', String(diffusionSteps));
-			form.append('length_adjust', String(lengthAdjust));
-			form.append('inference_cfg_rate', String(inferenceCfgRate));
-			form.append('f0_condition', String(f0Condition || conversionMode === 'singing'));
-			form.append('auto_f0_adjust', String(autoF0Adjust));
-			form.append('semi_tone_shift', String(semiToneShift));
-			form.append('fp16', String(fp16));
+			form.append('conversion_mode', 'singing');
+			form.append('steps', String(generationSteps));
+			form.append('cfg_scale', String(cfgScale));
+			form.append('auto_shift', String(autoShift));
+			form.append('pitch_shift', String(pitchShift));
+			form.append('separate_vocals', String(separateVocals));
+			form.append('mix_accompaniment', String(mixAccompaniment && separateVocals));
+			form.append('seed', String(seed));
 			const response = await apiFetch('/api/voice-conversion', { method: 'POST', body: form });
-			const payload = await response.json();
+			const payload: {
+				audio_url: string;
+				transcript?: string | null;
+				voice_id?: string | null;
+				model_id?: string | null;
+				job_id?: string | null;
+				created_at?: string | null;
+			} = await response.json();
 			outputUrl = payload.audio_url;
 			await loadHistory();
-			const latest = history[0];
+			const latest =
+				(payload.job_id ? history.find((item) => item.id === payload.job_id) : null) ??
+				history.find((item) => item.output_audio_url === payload.audio_url) ??
+				(payload.job_id
+					? {
+							id: payload.job_id,
+							model_id: payload.model_id || modelId,
+							source_audio_url: selectedProject?.source_audio_url || null,
+							target_voice_id: payload.voice_id || selectedVoiceId,
+							output_audio_url: payload.audio_url,
+							transcript: payload.transcript ?? null,
+							created_at: payload.created_at || new Date().toISOString()
+						}
+					: null);
 			if (latest) {
 				projectVersions = [latest, ...projectVersions.filter((item) => item.id !== latest.id)];
 			}
 			transcript = payload.transcript || transcript;
 			saveCurrentProject({ versions: projectVersions, transcript });
-			onNotice('success', '보이스 체인저 변환을 완료했습니다.');
-			stopProgress('보이스 체인저 변환이 완료되었습니다.');
+			onNotice('success', t('cover.finished'));
+			stopProgress(t('cover.done'));
 		} catch (error) {
 			stopProgress();
 			progress = { percent: 0, message: '', elapsed: 0, active: false };
@@ -531,187 +618,243 @@
 		}
 	}
 
-	async function launchRealtime() {
-		realtimeLaunching = true;
-		realtimeStatus = { state: 'launching', message: 'Seed-VC 실시간 GUI 실행을 요청했습니다. 잠시만 기다려 주세요.' };
-		try {
-			const form = new FormData();
-			form.append('fp16', String(fp16));
-			const response = await apiFetch('/api/voice-conversion/realtime/launch', { method: 'POST', body: form });
-			const payload = await response.json();
-			realtimeStatus = {
-				state: 'running',
-				message: payload.message || 'Seed-VC 실시간 GUI를 실행했습니다. 실행된 창을 확인하세요.',
-				pid: payload.pid ?? null
-			};
-			onNotice('success', payload.message || 'Seed-VC 실시간 GUI를 실행했습니다.');
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			realtimeStatus = { state: 'error', message };
-			onNotice('error', message);
-		} finally {
-			realtimeLaunching = false;
-		}
-	}
 </script>
 
 {#if mode === 'list'}
 	<VoiceChangerProjectList {projects} {voices} onCreate={startNew} onOpen={openProject} onDelete={deleteProject} />
 {:else}
-<div class="workspace-grid">
-	<section class="surface workspace-main">
-		<div class="section-heading">
-			<div>
-				<label class="inline-title-label">
-					<span class="hidden">보이스 체인저 제목</span>
-					<input class="inline-title-input" value={title} oninput={(event) => { title = event.currentTarget.value; saveCurrentProject(); }} aria-label="보이스 체인저 제목" />
-				</label>
-				<p>{conversionMode === 'singing' ? 'Seed-VC 보컬/SVC 모드로 노래의 피치 흐름을 유지하면서 대상 목소리로 변환합니다.' : '원본 음성의 말 내용과 타이밍을 유지하면서 대상 목소리로 직접 변환합니다.'}</p>
+	<div class="workspace-grid">
+		<section class="surface workspace-main">
+			<div class="section-heading">
+				<div>
+					<label class="inline-title-label">
+						<span class="hidden">{t('cover.titleLabel')}</span>
+						<input class="inline-title-input" value={title} oninput={(event) => { title = event.currentTarget.value; saveCurrentProject(); }} aria-label={t('cover.titleLabel')} />
+					</label>
+				</div>
+				<div class="button-row wrap">
+					<button class="secondary-action" onclick={backToList}><ArrowLeft size={17} />{t('voice.ed.list')}</button>
+					<button class="primary-action" disabled={busy || !canConvert} onclick={convert}>
+						{#if busy}<Loader2 class="spin" size={18} />{t('cover.making')}{:else}<Wand2 size={18} />{t('cover.make')}{/if}
+					</button>
+				</div>
 			</div>
-			<div class="button-row wrap">
-				<button class="secondary-action" onclick={backToList}><ArrowLeft size={17} />목록</button>
-				<button class="primary-action" disabled={busy || !canConvert} onclick={convert}>
-					{#if busy}<Loader2 class="spin" size={18} />변환 중{:else}<Wand2 size={18} />변환 시작{/if}
-				</button>
+			<div class="cover-source-entry">
+				<div class="cover-source-heading">
+					<FileAudio size={26} />
+					<div>
+						<h3>{file?.name ?? selectedProject?.source_title ?? t('cover.importTitle')}</h3>
+					</div>
+				</div>
+								<div class="cover-url-input">
+					<label class="field-label inline-flex items-center gap-1" for="cover-media-url">{t('cover.link')}<HelpPopover label={t('cover.link')} text={t('cover.linkHelp')} /></label>
+					<div class="button-row wrap">
+						<input
+							id="cover-media-url"
+							class="studio-input flex-input"
+							type="url"
+							bind:value={mediaUrl}
+							placeholder="https://www.youtube.com/watch?v=..."
+							aria-label={t('cover.linkLabel')}
+						/>
+						<button class="secondary-action" disabled={importingMedia || savingSource || busy || !mediaUrl.trim()} onclick={importMediaSource}>
+							{#if importingMedia}<Loader2 class="spin" size={17} />{t('voice.link.importing')}{:else}<Link2 size={17} />{t('voice.link.import')}{/if}
+						</button>
+					</div>
+					{#if mediaImportError}
+						<p class="field-error">{mediaImportError}</p>
+					{/if}
+				</div>
+				{#if savingSource}
+					<p class="field-helper">{t('cover.saving')}</p>
+				{/if}
+				<div class="button-row">
+					<label class="secondary-action">{file ? t('cover.replace') : t('cover.pickFile')}<input class="hidden" type="file" accept="audio/*" onchange={onFileChange} /></label>
+					<button class="secondary-action" disabled={!file || transcribing || savingSource || importingMedia} onclick={transcribeSource}>
+						{#if transcribing}<Loader2 class="spin" size={17} />{t('cover.lyricsBusy')}{:else}<FileAudio size={17} />{t('cover.lyrics')}{/if}
+					</button>
+				</div>
 			</div>
-		</div>
-		<div class="upload-zone compact">
-			<FileAudio size={40} />
-			<h3>{file?.name ?? '이 문서의 원본 음성 등록'}</h3>
-			<p>한 작업 문서에는 하나의 원본 녹음/파일을 둡니다. 이 원본을 여러 대상 목소리로 변환해 비교합니다.</p>
-			<p class="field-helper">대본 읽기는 원본 음성을 텍스트로 표시하는 STT 작업이고, 변환 시작은 같은 원본을 대상 목소리로 바꾸는 보이스 체인저 작업입니다.</p>
-			{#if savingSource}
-				<p class="field-helper">원본 음성을 작업에 저장하는 중입니다.</p>
-			{/if}
-			{#if recording}
-				<div class="recording-panel" aria-live="polite">
-					<span class="recording-dot"></span>
-					<strong>녹음 중 {formatTime(recordingSeconds)}</strong>
-					<small>말을 마친 뒤 녹음 종료를 누르세요.</small>
+			{#if selectedProject?.source_origin || selectedProject?.source_title || selectedProject?.source_page_url}
+				<div class="result-preview cover-source-summary">
+					<div class="section-heading compact-heading">
+						<div>
+							<h3>{t('cover.info')}</h3>
+							<p>
+								{selectedProject?.source_origin === 'instagram'
+									? t('cover.origin.instagram')
+									: selectedProject?.source_origin === 'youtube'
+										? t('cover.origin.youtube')
+										: t('cover.origin.file')}
+								{#if selectedProject?.source_duration_seconds}
+									· {formatTime(selectedProject.source_duration_seconds)}
+								{/if}
+							</p>
+						</div>
+						{#if selectedProject?.source_page_url}
+							<a class="secondary-action" href={selectedProject.source_page_url} target="_blank" rel="noreferrer">{t('cover.original')}</a>
+						{/if}
+					</div>
+					<strong>{selectedProject?.source_title || selectedProject?.source_audio_name || file?.name}</strong>
+					{#if selectedProject?.source_audio_name}
+						<p class="field-helper">{selectedProject.source_audio_name}</p>
+					{/if}
+					{#if selectedProject?.source_audio_url && !savingSource && !importingMedia}
+						{#key selectedProject.source_audio_url}
+							<AudioDownload path={selectedProject.source_audio_url} filename={selectedProject.source_title || selectedProject.source_audio_name || 'cover-source'} label={t('cover.fullSong')} />
+						{/key}
+					{/if}
 				</div>
 			{/if}
-			<div class="button-row center">
-				<label class="secondary-action">{file ? '원본 파일 교체' : '원본 파일 선택'}<input class="hidden" type="file" accept="audio/*" onchange={onFileChange} /></label>
-				<button class="secondary-action" class:recording onclick={toggleRecord}><Mic size={17} />{recording ? '녹음 종료' : '녹음'}</button>
-				<button class="secondary-action" disabled={!file || transcribing || savingSource} onclick={transcribeSource}>
-					{#if transcribing}<Loader2 class="spin" size={17} />대본 읽는 중{:else}<FileAudio size={17} />{sttProvider === 'apple-speech' ? 'Apple Speech STT' : 'Whisper STT'} 대본 읽기{/if}
-				</button>
-			</div>
-		</div>
-		{#if previewUrl}
-			<div class="result-preview">
-				<h3>원본 음성</h3>
-				<audio controls src={previewUrl}></audio>
-			</div>
-		{/if}
-		{#if transcript}
-			<div class="result-preview">
-				<h3>원본 음성 대본</h3>
-				<textarea class="studio-input compact-textarea" value={transcript} oninput={(event) => { transcript = event.currentTarget.value; saveCurrentProject({ transcript }); }}></textarea>
-			</div>
-		{/if}
-		<div class="wave-editor">
-			<div bind:this={waveformEl}></div>
-			{#if previewUrl && timelineTicks.length}
-				<div class="wave-timeline" aria-label="파형 시간 눈금">
-					{#each timelineTicks as tick}
-						<span>{formatTime(tick)}</span>
-					{/each}
+			{#if previewUrl}
+				<div class="result-preview">
+					<h3>{t('cover.preview')}</h3>
+					<audio controls src={previewUrl}></audio>
 				</div>
 			{/if}
-			{#if !previewUrl}
-				<div class="wave-placeholder">원본 음성을 추가하면 파형과 선택 구간이 표시됩니다.</div>
+			{#if transcript}
+				<div class="result-preview">
+					<h3>{t('cover.lyricsText')}</h3>
+					<textarea class="studio-input compact-textarea" value={transcript} oninput={(event) => { transcript = event.currentTarget.value; saveCurrentProject({ transcript }); }}></textarea>
+				</div>
 			{/if}
-		</div>
-		{#if previewUrl}
-			<div class="transport-row">
-				<button class="icon-button" onclick={() => activeRegion?.play()} aria-label="선택 구간 재생"><Play size={18} /></button>
-				<button class="icon-button" onclick={() => wave?.pause()} aria-label="일시 정지"><Pause size={18} /></button>
-				<button class="icon-button" onclick={() => wave?.seekTo(0)} aria-label="처음으로"><RotateCcw size={18} /></button>
-				<button class="secondary-action compact" onclick={() => {
-					trimStart = 0;
-					trimEnd = duration;
-					activeRegion?.setOptions?.({ start: 0, end: duration });
-				}}>전체 선택</button>
-				<span>선택 {formatTime(trimStart)} - {formatTime(trimEnd)} · {selectedDuration.toFixed(1)}초</span>
+			<div class="wave-editor">
+				<div bind:this={waveformEl}></div>
+				{#if previewUrl && timelineTicks.length}
+					<div class="wave-timeline" aria-label={t('voice.wave.ticks')}>
+						{#each timelineTicks as tick (tick)}
+							<span>{formatTime(tick)}</span>
+						{/each}
+					</div>
+				{/if}
+				{#if !previewUrl}
+					<div class="wave-placeholder">{t('cover.placeholder')}</div>
+				{/if}
 			</div>
-			{#if selectionTooShort}
-				<p class="warning-note">선택 구간이 너무 짧습니다. 말소리가 또렷한 3~8초 구간을 선택해 주세요.</p>
-			{:else if conversionMode === 'singing'}
-				<p class="field-helper">보컬/SVC 모드는 노래 구간 전체를 사용할 수 있습니다. 피치가 흔들리면 반음 이동과 자동 F0 보정을 조정해 다시 비교하세요.</p>
-			{:else}
-				<p class="field-helper">긴 구간도 변환할 수 있습니다. 다만 1분 이상은 처리 시간이 오래 걸릴 수 있어 문장 단위 선택을 권장합니다.</p>
+			{#if previewUrl}
+				<div class="transport-row">
+					<button class="icon-button" onclick={() => activeRegion?.play()} aria-label={t('voice.wave.playLabel')}><Play size={18} /></button>
+					<button class="icon-button" onclick={() => wave?.pause()} aria-label={t('voice.wave.pause')}><Pause size={18} /></button>
+					<button class="icon-button" onclick={() => wave?.seekTo(0)} aria-label={t('voice.wave.restart')}><RotateCcw size={18} /></button>
+					<button class="secondary-action compact" onclick={() => {
+						trimStart = 0;
+						trimEnd = duration;
+						activeRegion?.setOptions?.({ start: 0, end: duration });
+					}}>{t('cover.selectAll')}</button>
+					<span>{t('cover.selection', { range: formatTime(trimStart) + ' - ' + formatTime(trimEnd), seconds: selectedDuration.toFixed(1) })}</span>
+				</div>
+				{#if selectionTooShort}
+					<p class="warning-note">{t('cover.tooShortNote')}</p>
+				{/if}
 			{/if}
-		{/if}
-		<ProgressPanel {progress} fallbackMessage="변환 중입니다." />
-		<VoiceChangerResultsPanel {projectVersions} {voices} />
-	</section>
-	<VoiceChangerSettingsPanel
-		{voices}
-		{vcModels}
-		{selectedModel}
-		{sttProvider}
-		{sttLanguage}
-		{modelId}
-		{voiceId}
-		{conversionMode}
-		{diffusionSteps}
-		{lengthAdjust}
-		{inferenceCfgRate}
-		{f0Condition}
-		{autoF0Adjust}
-		{semiToneShift}
-		{fp16}
-		{realtimeLaunching}
-		{realtimeStatus}
-		onSttProviderChange={(value) => (sttProvider = value)}
-		onSttLanguageChange={(value) => (sttLanguage = value)}
-		onModelChange={(value) => {
-			modelId = value;
-			saveCurrentProject();
-		}}
-		onVoiceChange={(value) => {
-			voiceId = value;
-			saveCurrentProject();
-		}}
-		onConversionModeChange={(value) => {
-			conversionMode = value;
-			if (value === 'singing') {
-				f0Condition = true;
-				autoF0Adjust = true;
-				diffusionSteps = Math.max(diffusionSteps, 40);
-			}
-			saveCurrentProject();
-		}}
-		onDiffusionStepsChange={(value) => {
-			diffusionSteps = value;
-			saveCurrentProject();
-		}}
-		onLengthAdjustChange={(value) => {
-			lengthAdjust = value;
-			saveCurrentProject();
-		}}
-		onInferenceCfgRateChange={(value) => {
-			inferenceCfgRate = value;
-			saveCurrentProject();
-		}}
-		onF0ConditionChange={(value) => {
-			f0Condition = value;
-			saveCurrentProject();
-		}}
-		onAutoF0AdjustChange={(value) => {
-			autoF0Adjust = value;
-			saveCurrentProject();
-		}}
-		onSemiToneShiftChange={(value) => {
-			semiToneShift = value;
-			saveCurrentProject();
-		}}
-		onFp16Change={(value) => {
-			fp16 = value;
-			saveCurrentProject();
-		}}
-		onLaunchRealtime={launchRealtime}
-	/>
-</div>
+			<ProductionAssistPanel
+				panelId="cover"
+				kinds={['cover']}
+				contextKey={JSON.stringify({ project: selectedProjectId, title, voice: selectedVoiceId, model: modelId, source: selectedProject?.source_audio_url, file: file ? [file.name, file.size, file.lastModified] : null, trimStart, trimEnd, transcript })}
+				currentSettings={{ quality, cfg_scale: cfgScale, pitch_shift: pitchShift, auto_shift: autoShift, separate_vocals: separateVocals, mix_accompaniment: mixAccompaniment && separateVocals }}
+				disabled={busy || savingSource || importingMedia || transcribing}
+				allowApply={Boolean(selectedProjectId)}
+				onApply={applyCoverRecommendation}
+			/>
+			<ProgressPanel {progress} fallbackMessage={t('cover.progress')} />
+			<VoiceChangerResultsPanel {projectVersions} {voices} />
+		</section>
+		<VoiceChangerSettingsPanel
+			{voices}
+			{vcModels}
+			{selectedVoice}
+			{selectedModel}
+			{sttProvider}
+			{sttLanguage}
+			voiceId={selectedVoiceId}
+			{modelId}
+			{quality}
+			{cfgScale}
+			{autoShift}
+			{pitchShift}
+			{separateVocals}
+			{mixAccompaniment}
+			{seed}
+			onSttProviderChange={(value) => (sttProvider = value)}
+			onSttLanguageChange={(value) => (sttLanguage = value)}
+			onModelChange={(value) => {
+				modelId = value;
+				saveCurrentProject();
+			}}
+			onVoiceChange={(value) => {
+				voiceId = value;
+				saveCurrentProject();
+			}}
+			onQualityChange={(value) => {
+				quality = value;
+				saveCurrentProject();
+			}}
+			onCfgScaleChange={(value) => {
+				cfgScale = value;
+				saveCurrentProject();
+			}}
+			onAutoShiftChange={(value) => {
+				autoShift = value;
+				saveCurrentProject();
+			}}
+			onPitchShiftChange={(value) => {
+				pitchShift = value;
+				saveCurrentProject();
+			}}
+			onSeparateVocalsChange={(value) => {
+				separateVocals = value;
+				if (!value) mixAccompaniment = false;
+				saveCurrentProject();
+			}}
+			onMixAccompanimentChange={(value) => {
+				mixAccompaniment = value;
+				saveCurrentProject();
+			}}
+			onSeedChange={(value) => {
+				seed = value;
+				saveCurrentProject();
+			}}
+		/>
+	</div>
 {/if}
+
+<style>
+	.cover-url-input {
+		display: grid;
+		gap: 8px;
+		width: 100%;
+	}
+
+	.cover-source-entry {
+		display: grid;
+		gap: 12px;
+		border-block: 1px solid var(--border-soft);
+		padding: 18px 0;
+	}
+
+	.cover-source-heading {
+		display: grid;
+		grid-template-columns: auto minmax(0, 1fr);
+		gap: 12px;
+		align-items: start;
+	}
+
+	.cover-source-heading :global(svg) {
+		margin-top: 2px;
+		color: var(--accent-hover);
+	}
+
+	.cover-source-heading h3 {
+		margin: 0;
+	}
+
+	.flex-input {
+		flex: 1 1 320px;
+		min-width: 0;
+	}
+
+	.cover-source-summary strong {
+		display: block;
+		margin-top: 6px;
+	}
+</style>

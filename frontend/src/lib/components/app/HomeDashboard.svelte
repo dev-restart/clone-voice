@@ -1,12 +1,18 @@
 <script lang="ts">
-	import { Activity, AudioLines, Mic, Plus, RefreshCw, Settings, Wand2 } from 'lucide-svelte';
+	import { Activity, ArrowRight, AudioLines, Check, Cpu, Mic, Plus, RefreshCw, ShieldCheck, Sparkles, Wand2 } from '@lucide/svelte';
+	import HelpPopover from '$lib/components/HelpPopover.svelte';
+	import TtsTemplatePicker from '$lib/components/tts/TtsTemplatePicker.svelte';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
-	import { Card } from '$lib/components/ui/card';
-	import type { ContentItem, RuntimeHealth, RuntimeModelStatus } from '$lib/studio/types';
+	import { i18n, t } from '$lib/i18n/index.svelte';
+	import { audioUrl } from '$lib/studio/api';
+	import type { ProductionTemplate } from '$lib/studio/production';
+	import type { ContentItem, RuntimeHealth, RuntimeModelStatus, VoiceProfile } from '$lib/studio/types';
 
 	let {
 		voicesCount = 0,
+		voices = [],
+		selectedVoiceId = '',
 		models = [],
 		contents = [],
 		health = null,
@@ -14,11 +20,21 @@
 		refreshing = false,
 		onCreateVoice,
 		onNavigateTts,
+		onNavigateSfx,
+		onCreateTts,
+		onOpenContent,
+		onUseTemplate,
+		onOpenSettings,
+		onNavigateStory,
 		onNavigateStt,
 		onNavigateChanger,
-		onRefresh
+		onRefresh,
+		onSelectVoice,
+		onUseVoice
 	}: {
 		voicesCount?: number;
+		voices?: VoiceProfile[];
+		selectedVoiceId?: string;
 		models?: RuntimeModelStatus[];
 		contents?: ContentItem[];
 		health?: RuntimeHealth | null;
@@ -26,146 +42,169 @@
 		refreshing?: boolean;
 		onCreateVoice: () => void;
 		onNavigateTts: () => void;
+		onNavigateSfx: () => void;
+		onCreateTts: () => void;
+		onOpenContent: (content: ContentItem) => void;
+		onUseTemplate: (template: ProductionTemplate) => void;
+		onOpenSettings: () => void;
+		onNavigateStory: () => void;
 		onNavigateStt: () => void;
 		onNavigateChanger: () => void;
 		onRefresh: () => void;
+		onSelectVoice: (id: string) => void;
+		onUseVoice: (id: string, target: 'tts' | 'story' | 'changer') => void;
 	} = $props();
 
 	let availableModels = $derived(models.filter((model) => model.status === 'available'));
 	let unavailableModels = $derived(models.filter((model) => model.status === 'unavailable'));
+	let primaryModel = $derived(availableModels.find((model) => model.capabilities.tts) ?? availableModels[0]);
+	let totalResults = $derived(contents.reduce((sum, item) => sum + item.results.length, 0));
 	let vcReady = $derived(models.some((model) => model.status === 'available' && model.capabilities.voice_conversion));
 	let sttReady = $derived(models.some((model) => model.status === 'available' && model.capabilities.stt) || health?.ok);
-	let recommended = $derived.by(() => {
-		if (voicesCount === 0) return '먼저 기준 목소리를 등록하면 TTS와 보이스 체인저 결과를 바로 비교할 수 있습니다.';
-		if (!availableModels.length) return '사용 가능한 생성 모델이 없습니다. 모델 설정에서 노출 상태와 준비 상태를 확인하세요.';
-		if (!contents.length) return '짧은 안내문을 저장해 두면 다국어 TTS 결과를 반복해서 비교하기 좋습니다.';
-		if (!vcReady) return 'Seed-VC 설정을 완료하면 녹음 파일을 선택한 목소리로 직접 변환할 수 있습니다.';
-		return '기준 목소리와 콘텐츠가 준비됐습니다. TTS 결과를 만들고 STT로 품질을 확인하세요.';
-	});
+	let selectedVoice = $derived(voices.find((voice) => voice.id === selectedVoiceId));
+	let recentContents = $derived([...contents].sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at)).slice(0, 5));
 
-	function modelBadge(model: RuntimeModelStatus) {
-		return model.status === 'available' ? 'success' : 'warning';
-	}
+	// First-run checklist: each step is derived from real state, so it completes by itself.
+	let voiceEngineReady = $derived(availableModels.some((model) => model.capabilities.tts));
+	let steps = $derived([
+		{ id: 'engine', done: voiceEngineReady, label: t('home.start.engine'), action: t('home.start.engine.action'), run: onOpenSettings },
+		{ id: 'voice', done: voicesCount > 0, label: t('home.start.voice'), action: t('home.start.voice.action'), run: onCreateVoice },
+		{ id: 'speech', done: totalResults > 0, label: t('home.start.speech'), action: t('home.start.speech.action'), run: onCreateTts }
+	]);
+	let doneCount = $derived(steps.filter((step) => step.done).length);
+	let nextStepId = $derived(steps.find((step) => !step.done)?.id);
 
-	function healthBadge() {
-		if (!health) return 'warning';
-		return health.ok && !health.model.error ? 'success' : 'danger';
-	}
-
-	let refreshIconClass = $derived(refreshing ? 'spin' : '');
+	const cardClass = 'border-border bg-card rounded-xl border p-5';
 </script>
 
-<section class="home-grid">
-	<article class="home-hero">
-		<img class="hero-art" src="/visuals/studio-hero.png" alt="" aria-hidden="true" />
-		<div class="hero-copy">
-			<h2>음성 제작 작업실</h2>
-			<p>
-				등록한 목소리, 대본, 생성 모델을 한 화면에서 확인하고 바로 제작합니다.
-				TTS와 변환 결과를 비교하면서 필요한 작업만 이어가세요.
-			</p>
-			<div class="hero-signal-strip" aria-label="스튜디오 준비 상태">
-				<span><strong>{voicesCount}</strong> 기준 목소리</span>
-				<span><strong>{availableModels.length}</strong> 사용 가능 모델</span>
-				<span><strong>{contents.length}</strong> 저장 콘텐츠</span>
-			</div>
-		</div>
-		<div class="button-row hero-actions">
-			<Button onclick={onCreateVoice}><Plus size={17} />새 목소리</Button>
-			<Button variant="secondary" onclick={onNavigateTts}><AudioLines size={17} />음성 생성</Button>
-			<Button variant="ghost" onclick={onRefresh} disabled={refreshing}><RefreshCw size={17} class={refreshIconClass} />상태 갱신</Button>
-		</div>
-	</article>
+<section class="home-dashboard grid gap-6">
+	<header class="flex flex-wrap items-center justify-between gap-3">
+		<h2 class="text-2xl font-semibold">{t('home.title')}</h2>
+		<span class="text-muted-foreground inline-flex items-center gap-1 text-xs">
+			<Badge variant="success"><ShieldCheck size={12} aria-hidden="true" />{t('home.offline')}</Badge>
+			<HelpPopover label={t('home.offline')} text={t('home.offline.help')} />
+		</span>
+	</header>
 
-	<div class="home-stat-row">
-		<article class="stat-card">
-			<span>{voicesCount}</span>
-			<p>등록 목소리</p>
-		</article>
-		<article class="stat-card">
-			<span>{availableModels.length}</span>
-			<p>사용 가능 모델</p>
-		</article>
-		<article class="stat-card">
-			<span>{contents.length}</span>
-			<p>저장 콘텐츠</p>
-		</article>
-	</div>
+	{#if doneCount < steps.length}
+		<section class="{cardClass} grid gap-3" aria-labelledby="start-heading">
+			<div class="flex items-center justify-between gap-3">
+				<h3 id="start-heading" class="text-base font-semibold">{t('home.start.title')}</h3>
+				<span class="text-muted-foreground text-xs">{t('home.start.progress', { done: doneCount, total: steps.length })}</span>
+			</div>
+			<ol class="m-0 grid list-none gap-2 p-0">
+				{#each steps as step, index (step.id)}
+					<li class="flex items-center gap-3 rounded-lg px-1 py-1">
+						<span class="flex size-6 shrink-0 items-center justify-center rounded-full text-xs font-semibold {step.done ? 'bg-success text-white' : step.id === nextStepId ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}">
+							{#if step.done}<Check size={14} aria-hidden="true" />{:else}{index + 1}{/if}
+						</span>
+						<span class="flex-1 text-sm {step.done ? 'text-muted-foreground line-through' : ''}">{step.label}</span>
+						{#if !step.done}
+							<Button variant={step.id === nextStepId ? 'default' : 'outline'} size="sm" onclick={step.run}>{step.action}<ArrowRight size={14} aria-hidden="true" /></Button>
+						{/if}
+					</li>
+				{/each}
+			</ol>
+		</section>
+	{/if}
 
-	<Card class="surface dashboard-panel system-panel">
-		<div class="section-heading compact">
-			<div>
-				<h2>작업 상태</h2>
-				<p>{lastRefreshedAt ? `${lastRefreshedAt} 기준` : '현재 제작 준비 상태를 확인합니다.'}</p>
-			</div>
-			<Activity size={20} />
-		</div>
-		<div class="status-list">
-			<div>
-				<span>API</span>
-				<Badge variant={healthBadge()}>{health?.ok ? '정상' : '확인 필요'}</Badge>
-			</div>
-			<div>
-				<span>Voice Engine</span>
-				<strong>{health?.model.engine ?? '-'}</strong>
-			</div>
-			<div>
-				<span>Device</span>
-				<strong>{health?.model.device ?? '-'}</strong>
-			</div>
-		</div>
-		{#if health?.model.error}
-			<p class="warning-note">{health.model.error}</p>
-		{/if}
-	</Card>
+	<nav class="core-workflows" aria-label={t('home.workflows.aria')}>
+		<button onclick={onCreateTts}><AudioLines size={24} /><strong>{t('nav.tts')}</strong><span>{t('home.tts.desc')}</span></button>
+		<button onclick={onNavigateSfx}><Sparkles size={24} /><strong>{t('nav.sfx')}</strong><span>{t('home.sfx.desc')}</span></button>
+		<button onclick={onNavigateChanger}><Wand2 size={24} /><strong>{t('nav.changer')}</strong><span>{t('home.cover.desc')}</span></button>
+	</nav>
 
-	<Card class="surface dashboard-panel model-panel">
-		<div class="section-heading compact">
-			<div>
-				<h2>생성 모델</h2>
-				<p>제작에 사용할 수 있는 모델과 확인이 필요한 모델을 구분합니다.</p>
+	{#if voices.length}
+		<section class="{cardClass} grid gap-4" aria-labelledby="voice-start-heading">
+			<div class="flex items-center justify-between gap-3">
+				<h3 id="voice-start-heading" class="text-base font-semibold">{t('home.voices.title')}</h3>
+				<span class="text-muted-foreground text-xs">{t('home.count', { count: voices.length })}</span>
 			</div>
-			<Settings size={20} />
-		</div>
-		<div class="compact-list">
-			{#each models as model (model.id)}
-				<div>
-					<strong>{model.label}</strong>
-					<Badge variant={modelBadge(model)}>{model.status === 'unavailable' ? '설정 필요' : '사용 가능'}</Badge>
+			<div class="grid gap-4 md:grid-cols-[minmax(0,1.5fr)_minmax(220px,1fr)]">
+				<div class="grid min-w-0 content-start gap-2.5">
+					<label for="home-voice-select" class="text-sm font-semibold">{t('home.voices.select')}</label>
+					<select id="home-voice-select" class="studio-input" value={selectedVoiceId} onchange={(event) => onSelectVoice(event.currentTarget.value)}>
+						<option value="">{t('home.voices.placeholder')}</option>
+						{#each voices as voice (voice.id)}<option value={voice.id}>{voice.name}</option>{/each}
+					</select>
+					{#if selectedVoice}
+						<audio class="h-10 w-full" controls preload="none" aria-label={t('home.voices.sample')} src={audioUrl(selectedVoice.audio_url)}></audio>
+					{/if}
 				</div>
-			{/each}
-		</div>
-		{#if unavailableModels.length}
-			<p class="warning-note">{unavailableModels.length}개 모델은 설정 확인이 필요합니다.</p>
-		{/if}
-	</Card>
-
-	<Card class="surface dashboard-panel content-panel">
-		<h2>최근 콘텐츠</h2>
-		<div class="compact-list">
-			{#each contents.slice(0, 5) as item (item.id)}
-				<div><strong>{item.title}</strong><span>{item.results.length} 결과</span></div>
-			{:else}
-				<p>아직 저장된 콘텐츠가 없습니다. 첫 대본을 저장하면 생성 결과와 번역본을 함께 관리할 수 있습니다.</p>
-			{/each}
-		</div>
-	</Card>
-
-	<Card class="surface dashboard-panel workflow-panel">
-		<div class="section-heading compact">
-			<div>
-				<h2>빠른 작업</h2>
-				<p>현재 준비 상태에 맞춰 다음 제작 단계를 추천합니다.</p>
+				<div class="grid content-start gap-2">
+					<Button onclick={() => onUseVoice(selectedVoiceId, 'tts')} disabled={!selectedVoice}><AudioLines size={16} />{t('home.voices.narrate')}</Button>
+					<Button variant="secondary" onclick={() => onUseVoice(selectedVoiceId, 'changer')} disabled={!selectedVoice || !vcReady}><Wand2 size={16} />{t('home.voices.cover')}</Button>
+				</div>
 			</div>
+		</section>
+	{:else}
+		<div class="bg-brand-soft flex flex-wrap items-center gap-3 rounded-xl px-5 py-4">
+			<Mic size={19} class="text-brand shrink-0" aria-hidden="true" />
+			<strong class="flex-1 text-sm">{t('home.firstVoice')}</strong>
+			<Button variant="secondary" onclick={onCreateVoice}><Plus size={16} />{t('nav.voice.register')}</Button>
 		</div>
-		<div class="workflow-actions">
-			<Button variant="secondary" onclick={onNavigateTts}><AudioLines size={17} />TTS</Button>
-			<Button variant="secondary" onclick={onNavigateStt} disabled={!sttReady}><Mic size={17} />STT</Button>
-			<Button variant="secondary" onclick={onNavigateChanger} disabled={!vcReady}><Wand2 size={17} />변환</Button>
-		</div>
-		<div class="recommendation-box">
-			<strong>추천 다음 작업</strong>
-			<p>{recommended}</p>
-		</div>
-	</Card>
+	{/if}
+
+	<section class="grid gap-3">
+		<h3 class="text-base font-semibold">{t('home.templates.title')}</h3>
+		<TtsTemplatePicker onSelect={onUseTemplate} />
+	</section>
+
+	<section class="text-muted-foreground flex flex-wrap gap-x-6 gap-y-1 text-sm" aria-label={t('home.summary.aria')}>
+		<span>{t('home.summary.voices')} <strong class="text-foreground">{t('home.count', { count: voicesCount })}</strong></span>
+		<span>{t('home.summary.scripts')} <strong class="text-foreground">{t('home.count', { count: contents.length })}</strong></span>
+		<span>{t('home.summary.results')} <strong class="text-foreground">{t('home.count', { count: totalResults })}</strong></span>
+	</section>
+
+	<div class="grid items-start gap-4 lg:grid-cols-[minmax(0,1.6fr)_minmax(260px,1fr)]">
+		<section class="{cardClass} grid gap-3">
+			<div class="flex items-center justify-between gap-3">
+				<h3 class="text-base font-semibold">{t('home.recent.title')}</h3>
+				<Button variant="ghost" size="sm" onclick={onNavigateTts}>{t('home.recent.all')}</Button>
+			</div>
+			<div class="recent-work-list">
+				{#each recentContents as item (item.id)}
+					<button onclick={() => onOpenContent(item)}>
+						<span class="recent-work-icon"><AudioLines size={17} /></span>
+						<span class="recent-work-copy"><strong>{item.title}</strong><small>{new Date(item.updated_at).toLocaleString(i18n.intl)}</small></span>
+						<span class="recent-work-result">{t('home.recent.results', { count: item.results.length })}</span>
+					</button>
+				{:else}
+					<div class="flex items-center justify-between gap-3 py-2">
+						<span class="text-muted-foreground text-sm">{t('home.recent.empty')}</span>
+						<Button variant="outline" size="sm" onclick={onCreateTts}><Plus size={14} />{t('home.recent.new')}</Button>
+					</div>
+				{/each}
+			</div>
+		</section>
+
+		<aside class="{cardClass} grid gap-3">
+			<div class="flex items-center justify-between gap-3">
+				<div>
+					<h3 class="text-base font-semibold">{t('home.status.title')}</h3>
+					<p class="text-muted-foreground text-xs">{lastRefreshedAt ? t('home.status.checked', { time: lastRefreshedAt }) : t('home.status.now')}</p>
+				</div>
+				<Button variant="ghost" size="icon" aria-label={t('models.reload')} onclick={onRefresh} disabled={refreshing}><RefreshCw size={16} class={refreshing ? 'animate-spin' : ''} /></Button>
+			</div>
+			<div class="grid gap-2 text-sm">
+				<div class="flex items-center justify-between gap-3"><span class="inline-flex items-center gap-2"><Activity size={16} />{t('home.status.server')}</span><Badge variant={health?.ok ? 'success' : 'danger'}>{health?.ok ? t('home.status.ok') : t('home.status.check')}</Badge></div>
+				<div class="flex items-center justify-between gap-3"><span class="inline-flex items-center gap-2"><Cpu size={16} />{t('home.status.engine')}</span><strong>{primaryModel?.label ?? t('home.status.needsSetup')}</strong></div>
+			</div>
+			<div class="flex flex-wrap gap-2">
+				<Button variant="secondary" size="sm" onclick={onNavigateStt} disabled={!sttReady}><Mic size={15} />{t('home.status.stt')}</Button>
+				<Button variant="secondary" size="sm" onclick={onNavigateChanger} disabled={!vcReady}><Wand2 size={15} />{t('nav.changer')}</Button>
+			</div>
+			{#if !primaryModel || unavailableModels.length}<button class="runtime-setup-link" onclick={onOpenSettings}>{t('home.status.setup')}</button>{/if}
+		</aside>
+	</div>
 </section>
+
+<style>
+	.core-workflows { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+	.core-workflows button { display: grid; align-content: start; text-align: left; gap: 10px; border: 1px solid var(--border); border-radius: 12px; padding: 22px; background: var(--card); color: var(--foreground); cursor: pointer; }
+	.core-workflows button:hover { border-color: var(--accent); background: var(--accent-soft); }
+	.core-workflows button:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+	.core-workflows strong { font-size: 18px; }
+	.core-workflows span { color: var(--muted-foreground); font-size: 13px; line-height: 1.6; }
+	@media (max-width: 760px) { .core-workflows { grid-template-columns: 1fr; gap: 10px; } .core-workflows button { padding: 18px; gap: 6px; } }
+</style>

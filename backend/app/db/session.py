@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from functools import lru_cache
+from threading import Lock
 from typing import Iterator
 
 from sqlalchemy import Engine, create_engine
@@ -9,6 +10,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings, get_settings
 from app.db.models import Base
+
+_schema_init_lock = Lock()
 
 
 @lru_cache(maxsize=16)
@@ -29,7 +32,10 @@ def get_session_factory(database_url: str):
 
 
 def init_db(settings: Settings | None = None) -> None:
-    Base.metadata.create_all(get_engine(settings))
+    # The first browser load requests voices and content concurrently. Without
+    # serialization, both requests can try to create the same fresh SQLite table.
+    with _schema_init_lock:
+        Base.metadata.create_all(get_engine(settings))
 
 
 @contextmanager

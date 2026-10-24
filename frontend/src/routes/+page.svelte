@@ -1,23 +1,30 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, tick } from 'svelte';
 	import AppShell from '$lib/components/AppShell.svelte';
-	import ApiLogPanel from '$lib/components/app/ApiLogPanel.svelte';
+	import AssetLibraryWorkspace from '$lib/components/AssetLibraryWorkspace.svelte';
 	import HomeDashboard from '$lib/components/app/HomeDashboard.svelte';
 	import NoticePanel from '$lib/components/app/NoticePanel.svelte';
+	import GenerationQueueStatus from '$lib/components/app/GenerationQueueStatus.svelte';
 	import ModelSettingsPanel from '$lib/components/ModelSettingsPanel.svelte';
 	import SpeechToTextWorkspace from '$lib/components/SpeechToTextWorkspace.svelte';
+	import SoundEffectWorkspace from '$lib/components/SoundEffectWorkspace.svelte';
 	import StoryStudioWorkspace from '$lib/components/StoryStudioWorkspace.svelte';
 	import TextToSpeechWorkspace from '$lib/components/TextToSpeechWorkspace.svelte';
 	import VoiceChangerWorkspace from '$lib/components/VoiceChangerWorkspace.svelte';
 	import VoiceCreateEditor from '$lib/components/VoiceCreateEditor.svelte';
 	import VoiceLibrary from '$lib/components/VoiceLibrary.svelte';
 	import { apiFetch } from '$lib/studio/api';
-	import type { ApiLogEntry } from '$lib/studio/api';
+	import { i18n, t } from '$lib/i18n/index.svelte';
+	import { defaultStudioPreferences, type StudioPreferences, type StudioPreferencesResponse } from '$lib/studio/preferences';
+	import { voiceSections } from '$lib/components/app/navigation';
+	import { domainMeta } from '$lib/studio/model-domains';
+	import { isEnabled, normalizeModelState, sortModels, withDefaultModel, withModelEnabled, withModelMoved, type ModelDefaults, type ModelState } from '$lib/studio/models';
+	import type { TtsEntry } from '$lib/studio/production';
 	import type {
 		ContentItem,
 		MenuKey,
 		ModelListResponse,
-		ModelPreference,
+		ModelDomain,
 		ModelPreferencesResponse,
 		RuntimeHealth,
 		RuntimeModelStatus,
@@ -25,14 +32,10 @@
 		VoiceProfile
 	} from '$lib/studio/types';
 
-	const DEFAULT_MODEL_ORDER: Record<string, number> = {
-		omnivoice: 10,
-		voxcpm: 20,
-		cosyvoice: 30,
-		'seed-vc': 40
-	};
+	const PREFERRED_VOICE_KEY = 'clonevoice.preferredVoice.v1';
 
-	let active = $state<MenuKey>('home');
+	let active = $state<MenuKey>('tts');
+	let studioPreferences = $state<StudioPreferences>({ ...defaultStudioPreferences });
 	let voices = $state<VoiceProfile[]>([]);
 	let contents = $state<ContentItem[]>([]);
 	let models = $state<RuntimeModelStatus[]>([]);
@@ -40,195 +43,100 @@
 	let selectedVoiceId = $state('');
 	let notice = $state<StudioNotice | null>(null);
 	let loading = $state(true);
+	let preferencesLoaded = $state(false);
+	const ready = $derived(!loading && preferencesLoaded);
 	let refreshing = $state(false);
 	let lastRefreshedAt = $state('');
 	let creatingVoice = $state(false);
 	let createSession = $state(0);
 	let navigationResetKey = $state(0);
-	let apiLogs = $state<ApiLogEntry[]>([]);
-	let modelPreferences = $state<Record<string, ModelPreference>>({});
-	let defaultTtsModelId = $state('omnivoice');
+	let modelState = $state<ModelState>({ preferences: {}, defaults: {} });
+	let ttsEntry = $state<TtsEntry | null>(null);
+	let startWithVoice = $state(false);
+	let initialMenuPending = true;
 
-	let orderedModels = $derived(sortModels(models, modelPreferences));
-	let activeModels = $derived(orderedModels.filter((model) => isModelEnabled(model.id)));
+	let orderedModels = $derived(sortModels(models, modelState.preferences));
+	let activeModels = $derived(orderedModels.filter((model) => isEnabled(modelState, model.id)));
+	let defaultTtsModelId = $derived(modelState.defaults.voice ?? 'voxcpm');
+	let defaultVcModelId = $derived(modelState.defaults.cover ?? 'soulx-singer');
+	let defaultSfxModelId = $derived(modelState.defaults.sfx ?? 'stable-audio-sfx');
 
 	onMount(() => {
-		const onApiLog = (event: Event) => {
-			apiLogs = [(event as CustomEvent<ApiLogEntry>).detail, ...apiLogs].slice(0, 8);
-		};
-		window.addEventListener('clonevoice:api-log', onApiLog);
+		try { selectedVoiceId = localStorage.getItem(PREFERRED_VOICE_KEY) ?? ''; } catch { /* Storage may be unavailable; selection still works for this session. */ }
+		void apiFetch('/api/studio/preferences').then((response) => response.json()).then((payload: StudioPreferencesResponse) => {
+			studioPreferences = payload.preferences;
+			if (initialMenuPending) active = payload.preferences.start_menu;
+			initialMenuPending = false;
+		}).catch(() => { /* Keep core defaults when preferences cannot be loaded. */ }).finally(() => { preferencesLoaded = true; });
 		void refreshAll();
-		return () => window.removeEventListener('clonevoice:api-log', onApiLog);
 	});
 
-	function defaultOrder(model: RuntimeModelStatus, index = 0) {
-		return DEFAULT_MODEL_ORDER[model.id] ?? 100 + index;
-	}
-
-	function sortModels(items: RuntimeModelStatus[], preferences: Record<string, ModelPreference>) {
-		return [...items].sort((a, b) => {
-			const orderA = preferences[a.id]?.order ?? defaultOrder(a, items.findIndex((item) => item.id === a.id));
-			const orderB = preferences[b.id]?.order ?? defaultOrder(b, items.findIndex((item) => item.id === b.id));
-			return orderA - orderB || a.label.localeCompare(b.label);
-		});
-	}
-
-	function isModelEnabled(modelId: string) {
-		return modelPreferences[modelId]?.enabled ?? true;
-	}
-
-	function normalizeModelPreferences(nextModels: RuntimeModelStatus[], serverPreferences: Record<string, ModelPreference> = {}, serverDefaultTtsModel?: string | null) {
-		const nextPreferences: Record<string, ModelPreference> = {};
-		nextModels.forEach((model, index) => {
-			const existing = serverPreferences[model.id];
-			nextPreferences[model.id] = {
-				id: model.id,
-				enabled: existing?.enabled ?? true,
-				order: Number.isFinite(existing?.order) ? Number(existing.order) : defaultOrder(model, index)
-			};
-		});
-
-		let nextDefaultTtsModelId = serverDefaultTtsModel || defaultTtsModelId;
-		let sorted = sortModels(nextModels, nextPreferences);
-		let activeTtsModels = sorted.filter((model) => model.capabilities.tts && nextPreferences[model.id]?.enabled !== false);
-		if (!activeTtsModels.length) {
-			const firstTtsModel = sorted.find((model) => model.capabilities.tts);
-			if (firstTtsModel) {
-				nextPreferences[firstTtsModel.id] = { ...nextPreferences[firstTtsModel.id], enabled: true };
-				activeTtsModels = [firstTtsModel];
-			}
-		}
-
-		if (!activeTtsModels.some((model) => model.id === nextDefaultTtsModelId)) {
-			nextDefaultTtsModelId = activeTtsModels.find((model) => model.status === 'available')?.id ?? activeTtsModels[0]?.id ?? nextDefaultTtsModelId;
-		}
-
-		modelPreferences = nextPreferences;
-		defaultTtsModelId = nextDefaultTtsModelId;
+	async function saveStudioPreferences(value: StudioPreferences) {
+		const response = await apiFetch('/api/studio/preferences', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value) });
+		const payload: StudioPreferencesResponse = await response.json();
+		studioPreferences = payload.preferences;
 	}
 
 	function applyServerModelPreferences(payload: ModelPreferencesResponse) {
-		normalizeModelPreferences(models, payload.model_preferences ?? {}, payload.default_tts_model);
+		modelState = normalizeModelState(models, payload.model_preferences ?? {}, serverDefaults(payload), modelState.defaults);
 	}
 
-	async function saveModelPreferences(nextPreferences: Record<string, ModelPreference>, nextDefaultTtsModelId = defaultTtsModelId) {
-		const response = await apiFetch('/api/models/preferences', {
-			method: 'PUT',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({
-				model_preferences: nextPreferences,
-				default_tts_model: nextDefaultTtsModelId
-			})
-		});
-		const payload: ModelPreferencesResponse = await response.json();
-		applyServerModelPreferences(payload);
+	function serverDefaults(payload: ModelPreferencesResponse): ModelDefaults {
+		return {
+			...payload.default_models,
+			voice: payload.default_models?.voice ?? payload.default_tts_model,
+			cover: payload.default_models?.cover ?? payload.default_vc_model
+		};
 	}
 
-	function firstActiveTtsModel(excludedModelId?: string) {
-		return orderedModels.find(
-			(model) => model.capabilities.tts && model.id !== excludedModelId && isModelEnabled(model.id) && model.status === 'available'
-		) ?? orderedModels.find((model) => model.capabilities.tts && model.id !== excludedModelId && isModelEnabled(model.id));
+	/** Applies a change optimistically and rolls back when the server rejects it. */
+	async function commitModelState(next: ModelState, onSuccess?: () => void) {
+		const previous = modelState;
+		modelState = next;
+		try {
+			const response = await apiFetch('/api/models/preferences', {
+				method: 'PUT',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					model_preferences: next.preferences,
+					default_models: next.defaults,
+					default_tts_model: next.defaults.voice,
+					default_vc_model: next.defaults.cover
+				})
+			});
+			applyServerModelPreferences(await response.json());
+			onSuccess?.();
+		} catch (error) {
+			modelState = previous;
+			showNotice('error', error instanceof Error ? error.message : String(error));
+		}
 	}
 
 	async function setModelEnabled(modelId: string, enabled: boolean) {
 		const model = models.find((item) => item.id === modelId);
 		if (!model) return;
-		if (!enabled && model.capabilities.tts && !firstActiveTtsModel(modelId)) {
-			showNotice('info', '음성 생성에 사용할 TTS 모델은 최소 한 개 이상 켜두어야 합니다.');
+		const change = withModelEnabled(models, modelState, modelId, enabled);
+		if (!change.ok) {
+			showNotice('info', t(change.reason === 'cover' ? 'models.notice.keepOne.cover' : 'models.notice.keepOne.voice'));
 			return;
 		}
-
-		const nextPreferences = {
-			...modelPreferences,
-			[modelId]: {
-				id: modelId,
-				enabled,
-				order: modelPreferences[modelId]?.order ?? defaultOrder(model, models.findIndex((item) => item.id === modelId))
-			}
-		};
-		let nextDefaultTtsModelId = defaultTtsModelId;
-		if (!enabled && defaultTtsModelId === modelId) {
-			nextDefaultTtsModelId = firstActiveTtsModel(modelId)?.id ?? defaultTtsModelId;
-		}
-		if (enabled && model.capabilities.tts && !orderedModels.some((item) => item.capabilities.tts && item.id === nextDefaultTtsModelId && nextPreferences[item.id]?.enabled !== false)) {
-			nextDefaultTtsModelId = modelId;
-		}
-
-		const previousPreferences = modelPreferences;
-		const previousDefaultTtsModelId = defaultTtsModelId;
-		modelPreferences = nextPreferences;
-		defaultTtsModelId = nextDefaultTtsModelId;
-		try {
-			await saveModelPreferences(nextPreferences, nextDefaultTtsModelId);
-			showNotice('success', `${model.label}을 ${enabled ? '사용 중' : '미사용'}으로 변경했습니다.`);
-		} catch (error) {
-			modelPreferences = previousPreferences;
-			defaultTtsModelId = previousDefaultTtsModelId;
-			showNotice('error', error instanceof Error ? error.message : String(error));
-		}
+		await commitModelState(change.state, () => showNotice('success', t(enabled ? 'models.notice.enabled' : 'models.notice.disabled', { name: model.label })));
 	}
 
-	async function setDefaultTtsModel(modelId: string) {
+	async function setDefaultModel(domain: ModelDomain, modelId: string) {
 		const model = models.find((item) => item.id === modelId);
-		if (!model || !model.capabilities.tts) return;
-		if (model.status === 'unavailable') {
-			showNotice('info', '설정이 필요한 모델은 대표 TTS 모델로 지정할 수 없습니다.');
+		if (!model) return;
+		const next = withDefaultModel(models, modelState, domain, modelId);
+		if (!next) {
+			if (model.status === 'unavailable') showNotice('info', t('models.notice.needsSetup'));
 			return;
 		}
-		const nextPreferences = {
-			...modelPreferences,
-			[modelId]: {
-				id: modelId,
-				enabled: true,
-				order: modelPreferences[modelId]?.order ?? defaultOrder(model, models.findIndex((item) => item.id === modelId))
-			}
-		};
-		const previousPreferences = modelPreferences;
-		const previousDefaultTtsModelId = defaultTtsModelId;
-		modelPreferences = nextPreferences;
-		defaultTtsModelId = modelId;
-		try {
-			await saveModelPreferences(nextPreferences, modelId);
-			showNotice('success', `${model.label}을 대표 TTS 모델로 설정했습니다.`);
-		} catch (error) {
-			modelPreferences = previousPreferences;
-			defaultTtsModelId = previousDefaultTtsModelId;
-			showNotice('error', error instanceof Error ? error.message : String(error));
-		}
+		await commitModelState(next, () => showNotice('success', t('models.notice.defaultSet', { name: model.label, domain: t(domainMeta(domain).label) })));
 	}
 
-	async function moveModel(modelId: string, direction: 'up' | 'down') {
-		const sorted = sortModels(models, modelPreferences);
-		const currentIndex = sorted.findIndex((model) => model.id === modelId);
-		const targetIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
-		if (currentIndex < 0 || targetIndex < 0 || targetIndex >= sorted.length) return;
-
-		const current = sorted[currentIndex];
-		const target = sorted[targetIndex];
-		const currentOrder = modelPreferences[current.id]?.order ?? defaultOrder(current, currentIndex);
-		const targetOrder = modelPreferences[target.id]?.order ?? defaultOrder(target, targetIndex);
-		const nextPreferences = {
-			...modelPreferences,
-			[current.id]: {
-				id: current.id,
-				enabled: isModelEnabled(current.id),
-				order: targetOrder
-			},
-			[target.id]: {
-				id: target.id,
-				enabled: isModelEnabled(target.id),
-				order: currentOrder
-			}
-		};
-
-		const previousPreferences = modelPreferences;
-		modelPreferences = nextPreferences;
-		try {
-			await saveModelPreferences(nextPreferences, defaultTtsModelId);
-		} catch (error) {
-			modelPreferences = previousPreferences;
-			showNotice('error', error instanceof Error ? error.message : String(error));
-		}
+	async function moveModel(domain: ModelDomain, modelId: string, direction: 'up' | 'down') {
+		const next = withModelMoved(models, modelState, domain, modelId, direction);
+		if (next) await commitModelState(next);
 	}
 
 	function showNotice(type: StudioNotice['type'], text: string) {
@@ -251,11 +159,11 @@
 			health = await healthRes.json();
 			const modelsPayload: ModelListResponse = await modelsRes.json();
 			models = modelsPayload.models ?? [];
-			normalizeModelPreferences(models, modelsPayload.model_preferences ?? {}, modelsPayload.default_tts_model);
+			applyServerModelPreferences(modelsPayload);
 			voices = await voicesRes.json();
 			contents = await contentsRes.json();
-			if (!selectedVoiceId && voices.length) selectedVoiceId = voices[0].id;
-			lastRefreshedAt = new Date().toLocaleTimeString('ko-KR');
+			if (selectedVoiceId && !voices.some((voice) => voice.id === selectedVoiceId)) selectVoice('');
+			lastRefreshedAt = new Date().toLocaleTimeString(i18n.intl);
 		} catch (error) {
 			showNotice('error', error instanceof Error ? error.message : String(error));
 		} finally {
@@ -267,24 +175,32 @@
 	async function refreshVoices() {
 		const voicesRes = await apiFetch('/api/voices');
 		voices = await voicesRes.json();
-		if (!selectedVoiceId && voices.length) selectedVoiceId = voices[0].id;
+		if (selectedVoiceId && !voices.some((voice) => voice.id === selectedVoiceId)) selectVoice('');
 	}
 
 	async function deleteVoice(id: string) {
 		try {
 			await apiFetch(`/api/voices/${id}`, { method: 'DELETE' });
 			voices = voices.filter((voice) => voice.id !== id);
-			if (selectedVoiceId === id) selectedVoiceId = voices[0]?.id ?? '';
-			showNotice('success', '목소리를 삭제했습니다.');
+			if (selectedVoiceId === id) selectVoice('');
+			showNotice('success', t('app.voiceDeleted'));
 		} catch (error) {
 			showNotice('error', error instanceof Error ? error.message : String(error));
 		}
 	}
 
 	function navigate(key: MenuKey) {
+		initialMenuPending = false;
+		startWithVoice = false;
+		if (key === 'tts') ttsEntry = null;
 		const isSameMenu = active === key;
 		active = key;
-		window.requestAnimationFrame(() => window.scrollTo({ top: 0, left: 0 }));
+		void tick().then(() => {
+			window.requestAnimationFrame(() => {
+				window.scrollTo({ top: 0, left: 0 });
+				document.querySelector<HTMLElement>('[data-route-heading]')?.focus({ preventScroll: true });
+			});
+		});
 		if (key === 'voices') {
 			if (isSameMenu) creatingVoice = false;
 		} else {
@@ -293,7 +209,34 @@
 		if (isSameMenu) navigationResetKey += 1;
 	}
 
+	function openTts(entry: TtsEntry) {
+		navigate('tts');
+		ttsEntry = entry;
+	}
+
+	async function openQueuedContent(id: string) {
+		try {
+			const response = await apiFetch(`/api/contents/${id}`);
+			const content: ContentItem = await response.json();
+			saveContentState(content);
+			openTts({ contentId: id });
+		} catch (error) { showNotice('error', error instanceof Error ? error.message : String(error)); }
+	}
+
+	function selectVoice(id: string) {
+		selectedVoiceId = voices.some((voice) => voice.id === id) ? id : '';
+		try { localStorage.setItem(PREFERRED_VOICE_KEY, selectedVoiceId); }
+		catch { showNotice('info', t('app.voiceNotSaved')); }
+	}
+
+	function useVoice(id: string, target: 'tts' | 'story' | 'changer') {
+		selectVoice(id);
+		if (target === 'tts') openTts({ newDraft: true });
+		else { navigate(target); startWithVoice = true; }
+	}
+
 	function startVoiceCreate() {
+		initialMenuPending = false;
 		active = 'voices';
 		creatingVoice = true;
 		createSession += 1;
@@ -301,16 +244,16 @@
 
 	async function onVoiceSaved(voice: VoiceProfile) {
 		voices = [voice, ...voices.filter((item) => item.id !== voice.id)];
-		selectedVoiceId = voice.id;
+		selectVoice(voice.id);
 		active = 'voices';
 		creatingVoice = false;
 		try {
 			await refreshVoices();
-			selectedVoiceId = voice.id;
+			selectVoice(voice.id);
 		} catch (error) {
 			showNotice(
 				'info',
-				`저장은 완료됐지만 목록 재조회가 실패했습니다. 새로고침하면 표시됩니다. ${error instanceof Error ? error.message : String(error)}`
+				t('app.reloadFail', { error: error instanceof Error ? error.message : String(error) })
 			);
 		}
 	}
@@ -329,29 +272,31 @@
 	}
 </script>
 
-<svelte:head>
-	<title>Clone Voice Studio · AI 음성 제작 스튜디오</title>
-	<meta
-		name="description"
-		content="목소리 등록, TTS, STT, 스토리 오디오, 보이스 체인저를 운영하는 음성 제작 스튜디오"
-	/>
-</svelte:head>
-
 <AppShell
 	{active}
+	{ready}
+	showAuxiliaryTools={studioPreferences.show_auxiliary_tools}
 	onNavigate={navigate}
 >
 	{#snippet children()}
 		{#if notice}
 			<NoticePanel {notice} />
 		{/if}
-		{#if notice?.type === 'error' || apiLogs.some((log) => !log.ok)}
-			<ApiLogPanel logs={apiLogs} open={notice?.type === 'error'} />
+		{#if ready}<GenerationQueueStatus {contents} onOpen={openQueuedContent} />{/if}
+		{#if ready && (active === 'tts' || active === 'voices')}
+			<nav class="voice-section-nav" aria-label={t('nav.voice.aria')}>
+				{#each voiceSections as section}
+					<button class:active={active === section.key && !creatingVoice} aria-current={active === section.key && !creatingVoice ? 'page' : undefined} onclick={() => navigate(section.key)}>{t(section.labelKey)}</button>
+				{/each}
+				<button class:active={creatingVoice} onclick={startVoiceCreate}>{t('nav.voice.register')}</button>
+			</nav>
 		{/if}
-		{#if loading}
-			<section class="surface loading-panel">스튜디오 상태를 불러오는 중입니다.</section>
+		{#if !ready}
+			<section class="surface loading-panel">{t('app.loading')}</section>
 		{:else if active === 'home'}
 			<HomeDashboard
+				{voices}
+				{selectedVoiceId}
 				voicesCount={voices.length}
 				models={activeModels}
 				{contents}
@@ -360,33 +305,51 @@
 				{refreshing}
 				onCreateVoice={startVoiceCreate}
 				onNavigateTts={() => navigate('tts')}
+				onCreateTts={() => openTts({ newDraft: true })}
+				onOpenContent={(content) => openTts({ contentId: content.id })}
+				onUseTemplate={(template) => openTts({ templateId: template.id })}
+				onOpenSettings={() => navigate('settings')}
+				onNavigateStory={() => navigate('story')}
 				onNavigateStt={() => navigate('stt')}
 				onNavigateChanger={() => navigate('changer')}
+				onNavigateSfx={() => navigate('sfx')}
 				onRefresh={() => refreshAll({ silent: true })}
+				onSelectVoice={selectVoice}
+				onUseVoice={useVoice}
 			/>
 		{:else if active === 'voices'}
 			{#if creatingVoice}
 				{#key createSession}
-					<VoiceCreateEditor onSaved={onVoiceSaved} onCancel={() => (creatingVoice = false)} onNotice={showNotice} />
+					<VoiceCreateEditor defaultSttProvider={studioPreferences.stt_provider} onSaved={onVoiceSaved} onCancel={() => (creatingVoice = false)} onNotice={showNotice} />
 				{/key}
 			{:else}
 				<VoiceLibrary
 					{voices}
 					{selectedVoiceId}
-					onSelect={(id) => (selectedVoiceId = id)}
+					onSelect={selectVoice}
+					onUse={useVoice}
+					canUseCover={activeModels.some((model) => model.status === 'available' && model.capabilities.voice_conversion)}
 					onCreate={startVoiceCreate}
 					onDelete={deleteVoice}
 					onUpdate={updateVoice}
 					onNotice={showNotice}
 				/>
 			{/if}
+		{:else if active === 'files'}
+			{#key `files-${navigationResetKey}`}
+				<AssetLibraryWorkspace {voices} onNavigate={navigate} onNotice={showNotice} />
+			{/key}
 		{:else if active === 'tts'}
 			{#key `tts-${navigationResetKey}`}
 				<TextToSpeechWorkspace
+					entry={ttsEntry}
 					{voices}
 					models={activeModels}
 					{defaultTtsModelId}
+					defaultVoiceId={selectedVoiceId}
 					{contents}
+					defaultSourceLanguage={studioPreferences.source_language}
+					onCreateVoice={startVoiceCreate}
 					onContentSaved={saveContentState}
 					onContentDeleted={deleteContentState}
 					onNotice={showNotice}
@@ -394,25 +357,40 @@
 			{/key}
 		{:else if active === 'story'}
 			{#key `story-${navigationResetKey}`}
-				<StoryStudioWorkspace {voices} models={activeModels} {defaultTtsModelId} onNotice={showNotice} />
+				<StoryStudioWorkspace {voices} models={activeModels} {defaultTtsModelId} defaultSttProvider={studioPreferences.stt_provider} defaultVoiceId={selectedVoiceId} {startWithVoice} onNotice={showNotice} />
 			{/key}
+		{:else if active === 'sfx'}
+			<SoundEffectWorkspace models={activeModels} defaultModelId={defaultSfxModelId} onNotice={showNotice} />
 		{:else if active === 'stt'}
-			<SpeechToTextWorkspace onNotice={showNotice} />
+			<SpeechToTextWorkspace defaultSttProvider={studioPreferences.stt_provider} onNotice={showNotice} />
 		{:else if active === 'changer'}
 			{#key `changer-${navigationResetKey}`}
-				<VoiceChangerWorkspace {voices} models={activeModels} onNotice={showNotice} />
+				<VoiceChangerWorkspace {voices} models={activeModels} {defaultVcModelId} defaultSttProvider={studioPreferences.stt_provider} defaultVoiceId={selectedVoiceId} {startWithVoice} onNotice={showNotice} />
 			{/key}
 		{:else if active === 'settings'}
 			<ModelSettingsPanel
+				{studioPreferences}
+				onSaveStudioPreferences={saveStudioPreferences}
 				models={orderedModels}
-				{modelPreferences}
-				{defaultTtsModelId}
+				modelPreferences={modelState.preferences}
+				defaultModels={modelState.defaults}
 				onReload={refreshAll}
 				onNotice={showNotice}
 				onToggleModel={setModelEnabled}
-				onMakeDefaultTts={setDefaultTtsModel}
+				onMakeDefault={setDefaultModel}
 				onMoveModel={moveModel}
 			/>
 		{/if}
 	{/snippet}
 </AppShell>
+<style>
+.voice-section-nav { display: flex; flex-wrap: wrap; gap: 5px; padding: 0 0 18px; }
+.voice-section-nav button { padding: 9px 18px; min-height: 42px; border: 1px solid transparent; border-radius: 8px; color: var(--muted-foreground); font-weight: 600; font-size: 13px; }
+.voice-section-nav button.active { color: var(--accent-hover); background: var(--card); border-color: var(--border); }
+.voice-section-nav button:hover { background: var(--accent-soft); }
+@media (max-width: 700px) {
+	:global(.story-title-row) { min-width: 0; width: 100%; }
+	:global(.story-title-row > .story-title-input), :global(.story-title-row > .button-row) { width: 100%; min-width: 0; max-width: 100%; }
+	:global(.story-title-row > .button-row) { flex-wrap: wrap; }
+}
+</style>

@@ -6,19 +6,30 @@ from app.config import Settings
 from app.db.repositories import StudioSettingsRepository
 from app.db.session import session_scope
 from app.schemas import (
+    MODEL_DOMAINS,
+    ModelDomain,
     ModelPreference,
     ModelPreferencesResponse,
     ModelPreferencesUpdateRequest,
     RuntimeModelStatus,
 )
+from app.services.model_router import DOMAIN_CAPABILITY
 
 MODEL_PREFERENCES_KEY = "model_display_preferences"
 DEFAULT_MODEL_ORDER = {
-    "omnivoice": 10,
-    "voxcpm": 20,
-    "cosyvoice": 30,
-    "seed-vc": 40,
+    "voxcpm": 10,
+    "soulx-singer": 20,
+    "stable-audio-sfx": 30,
 }
+# Older clients and stored rows only know these two defaults.
+LEGACY_DEFAULT_KEYS: dict[str, ModelDomain] = {"default_tts_model": "voice", "default_vc_model": "cover"}
+SUPPORT_LABEL = {"voice": "TTS", "music": "music generation", "cover": "voice conversion", "sfx": "sound-effect generation"}
+# Voice and cover always need a usable model; music and sound effects may be switched off entirely.
+REQUIRED_LABEL: dict[ModelDomain, str] = {"voice": "TTS-capable", "cover": "voice-conversion"}
+
+
+def _supports(model: RuntimeModelStatus, domain: ModelDomain) -> bool:
+    return bool(getattr(model.capabilities, DOMAIN_CAPABILITY[domain], False))
 
 
 def _default_order(model: RuntimeModelStatus, index: int) -> int:
@@ -50,17 +61,40 @@ def _stored_preferences_to_dict(stored: dict | None) -> dict[str, ModelPreferenc
     return preferences
 
 
+def _stored_defaults(stored: dict | None) -> dict[ModelDomain, str]:
+    if not isinstance(stored, dict):
+        return {}
+    defaults: dict[ModelDomain, str] = {}
+    for legacy_key, domain in LEGACY_DEFAULT_KEYS.items():
+        value = stored.get(legacy_key)
+        if isinstance(value, str) and value:
+            defaults[domain] = value
+    raw = stored.get("default_models")
+    if isinstance(raw, dict):
+        for domain in MODEL_DOMAINS:
+            value = raw.get(domain)
+            if isinstance(value, str) and value:
+                defaults[domain] = value
+    return defaults
+
+
+def _configured_default(settings: Settings, domain: ModelDomain) -> str:
+    return {
+        "voice": settings.default_tts_model,
+        "cover": settings.default_vc_model,
+        "sfx": settings.default_sfx_model,
+        "music": settings.default_music_model,
+    }[domain]
+
+
 def normalize_model_preferences(
     models: list[RuntimeModelStatus],
     settings: Settings,
     stored: dict | None = None,
     override_preferences: dict[str, ModelPreference] | None = None,
-    override_default_tts_model: str | None = None,
-    override_default_vc_model: str | None = None,
+    override_defaults: dict[ModelDomain, str] | None = None,
 ) -> ModelPreferencesResponse:
-    stored_preferences = _stored_preferences_to_dict(stored)
-    source_preferences = override_preferences if override_preferences is not None else stored_preferences
-    known_ids = {model.id for model in models}
+    source_preferences = override_preferences if override_preferences is not None else _stored_preferences_to_dict(stored)
     preferences: dict[str, ModelPreference] = {}
     for index, model in enumerate(models):
         preference = source_preferences.get(model.id)
@@ -69,36 +103,31 @@ def normalize_model_preferences(
             enabled=preference.enabled if preference else True,
             order=_coerce_order(preference.order if preference else None, _default_order(model, index)),
         )
-
     ordered_models = sorted(models, key=lambda model: (preferences[model.id].order, model.label))
-    active_tts_models = [model for model in ordered_models if model.capabilities.tts and preferences[model.id].enabled]
-    if not active_tts_models:
-        first_tts_model = next((model for model in ordered_models if model.capabilities.tts), None)
-        if first_tts_model:
-            preferences[first_tts_model.id] = ModelPreference(
-                id=first_tts_model.id,
-                enabled=True,
-                order=preferences[first_tts_model.id].order,
-            )
-            active_tts_models = [first_tts_model]
 
-    stored_default_tts_model = stored.get("default_tts_model") if isinstance(stored, dict) else None
-    stored_default_vc_model = stored.get("default_vc_model") if isinstance(stored, dict) else None
-    default_tts_model = override_default_tts_model or stored_default_tts_model or settings.default_tts_model
-    default_vc_model = override_default_vc_model or stored_default_vc_model or settings.default_vc_model
-
-    if default_tts_model not in {model.id for model in active_tts_models}:
-        default_tts_model = (
-            next((model.id for model in active_tts_models if model.status == "available"), None)
-            or (active_tts_models[0].id if active_tts_models else "")
-        )
-    if default_vc_model not in known_ids:
-        default_vc_model = next((model.id for model in ordered_models if model.capabilities.voice_conversion), None) or ""
+    stored_defaults = _stored_defaults(stored)
+    defaults: dict[ModelDomain, str] = {}
+    for domain in MODEL_DOMAINS:
+        domain_models = [model for model in ordered_models if _supports(model, domain)]
+        if not domain_models:
+            continue
+        active = [model for model in domain_models if preferences[model.id].enabled]
+        if not active and domain in REQUIRED_LABEL:
+            first = domain_models[0]
+            preferences[first.id] = ModelPreference(id=first.id, enabled=True, order=preferences[first.id].order)
+            active = [first]
+        if not active:
+            continue
+        wanted = (override_defaults or {}).get(domain) or stored_defaults.get(domain) or _configured_default(settings, domain)
+        if wanted not in {model.id for model in active}:
+            wanted = next((model.id for model in active if model.status == "available"), None) or active[0].id
+        defaults[domain] = wanted
 
     return ModelPreferencesResponse(
         model_preferences=preferences,
-        default_tts_model=default_tts_model,
-        default_vc_model=default_vc_model,
+        default_tts_model=defaults.get("voice", ""),
+        default_vc_model=defaults.get("cover", ""),
+        default_models=defaults,
     )
 
 
@@ -110,6 +139,7 @@ def model_preferences_to_storage(response: ModelPreferencesResponse) -> dict:
         },
         "default_tts_model": response.default_tts_model,
         "default_vc_model": response.default_vc_model,
+        "default_models": dict(response.default_models),
     }
 
 
@@ -132,10 +162,17 @@ def save_model_preferences(
     unknown_ids = sorted(set(request.model_preferences) - set(known_models))
     if unknown_ids:
         raise HTTPException(status_code=422, detail=f"Unknown model preference id: {', '.join(unknown_ids)}")
-    if request.default_tts_model and request.default_tts_model not in known_models:
-        raise HTTPException(status_code=422, detail=f"Unknown default TTS model: {request.default_tts_model}")
-    if request.default_tts_model and not known_models[request.default_tts_model].capabilities.tts:
-        raise HTTPException(status_code=422, detail=f"{request.default_tts_model} does not support TTS")
+
+    requested_defaults: dict[ModelDomain, str] = dict(request.default_models)
+    if request.default_tts_model:
+        requested_defaults.setdefault("voice", request.default_tts_model)
+    if request.default_vc_model:
+        requested_defaults.setdefault("cover", request.default_vc_model)
+    for domain, model_id in requested_defaults.items():
+        if model_id not in known_models:
+            raise HTTPException(status_code=422, detail=f"Unknown default {SUPPORT_LABEL[domain]} model: {model_id}")
+        if not _supports(known_models[model_id], domain):
+            raise HTTPException(status_code=422, detail=f"{model_id} does not support {SUPPORT_LABEL[domain]}")
 
     merged_preferences: dict[str, ModelPreference] = {}
     for index, model in enumerate(models):
@@ -145,9 +182,10 @@ def save_model_preferences(
             enabled=requested.enabled if requested else True,
             order=_coerce_order(requested.order if requested else None, _default_order(model, index)),
         )
-
-    if any(model.capabilities.tts for model in models) and not any(model.capabilities.tts and merged_preferences[model.id].enabled for model in models):
-        raise HTTPException(status_code=422, detail="At least one TTS-capable model must remain enabled.")
+    for domain, required_label in REQUIRED_LABEL.items():
+        domain_models = [model for model in models if _supports(model, domain)]
+        if domain_models and not any(merged_preferences[model.id].enabled for model in domain_models):
+            raise HTTPException(status_code=422, detail=f"At least one {required_label} model must remain enabled.")
 
     with session_scope(settings) as session:
         repository = StudioSettingsRepository(session)
@@ -157,8 +195,7 @@ def save_model_preferences(
             settings,
             stored=stored,
             override_preferences=merged_preferences,
-            override_default_tts_model=request.default_tts_model,
-            override_default_vc_model=request.default_vc_model,
+            override_defaults=requested_defaults,
         )
         repository.set(MODEL_PREFERENCES_KEY, model_preferences_to_storage(response))
     return response

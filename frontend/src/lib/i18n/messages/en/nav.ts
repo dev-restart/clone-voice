@@ -1,0 +1,31 @@
+import type { nav } from '../ko/nav.ts';
+
+export const nav_en: Record<keyof typeof nav, string> = {
+	'nav.aria': 'Studio menu',
+	'nav.ariaMobile': 'Mobile studio menu',
+	'nav.group.create': 'Create',
+	'nav.group.library': 'Library',
+	'nav.group.tools': 'Extra tools',
+	'nav.group.manage': 'Manage',
+	'nav.tts': 'Voice Clone',
+	'nav.sfx': 'Sound Effects',
+	'nav.changer': 'Song Cover',
+	'nav.home': 'Studio Home',
+	'nav.files': 'File Library',
+	'nav.story': 'Dialogue Audio',
+	'nav.stt': 'Transcribe',
+	'nav.settings': 'Settings',
+	'nav.voice.make': 'Generate speech',
+	'nav.voice.mine': 'My voices',
+	'nav.voice.register': 'Add a voice',
+	'nav.voice.aria': 'Voice clone tasks',
+	'page.home': 'Start a task and pick up recent scripts and results.',
+	'page.voices': 'Listen to your voices and manage names, notes and reference samples.',
+	'page.files': 'Replay or download registered samples and finished audio.',
+	'page.tts': 'Write the source text, edit each language, and generate speech in the voice you choose.',
+	'page.story': 'Turn source material into a multi-speaker dialogue with voices and sound effects.',
+	'page.sfx': 'Collect sounds in a project and manage their prompts and generated versions.',
+	'page.stt': 'Turn audio files or recordings into text and translate them.',
+	'page.changer': 'Import a song from a file or link and convert it to the voice you choose.',
+	'page.settings': 'Manage language, models and AI connections.'
+};

@@ -1,0 +1,25 @@
+import type { MessageKey } from './ko.ts';
+import { ai_en } from './en/ai.ts';
+import { app_en } from './en/app.ts';
+import { assist_en } from './en/assist.ts';
+import { common_en } from './en/common.ts';
+import { cover_en } from './en/cover.ts';
+import { files_en } from './en/files.ts';
+import { helpers_en } from './en/helpers.ts';
+import { home_en } from './en/home.ts';
+import { models_en } from './en/models.ts';
+import { nav_en } from './en/nav.ts';
+import { prefs_en } from './en/prefs.ts';
+import { production_en } from './en/production.ts';
+import { promptmgr_en } from './en/promptmgr.ts';
+import { queue_en } from './en/queue.ts';
+import { sound_en } from './en/sound.ts';
+import { soundresult_en } from './en/soundresult.ts';
+import { story_en } from './en/story.ts';
+import { stt_en } from './en/stt.ts';
+import { tts_en } from './en/tts.ts';
+import { ttsws_en } from './en/ttsws.ts';
+import { voice_en } from './en/voice.ts';
+import { voicelib_en } from './en/voicelib.ts';
+
+export const en: Record<MessageKey, string> = { ...ai_en, ...app_en, ...assist_en, ...common_en, ...cover_en, ...files_en, ...helpers_en, ...home_en, ...models_en, ...nav_en, ...prefs_en, ...production_en, ...promptmgr_en, ...queue_en, ...sound_en, ...soundresult_en, ...story_en, ...stt_en, ...tts_en, ...ttsws_en, ...voice_en, ...voicelib_en };

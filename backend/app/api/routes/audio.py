@@ -1,76 +1,34 @@
+import math
+import tempfile
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
-from app.api.deps import get_content_store, get_router, get_voice_store
+from app.api.deps import get_voice_store
 from app.config import Settings, get_settings
-from app.db.models import DbConversionJob, DbSttJob
+from app.db.models import DbSttJob
 from app.db.session import session_scope
 from app.schemas import (
-    ContentCreateRequest,
-    ContentGenerateRequest,
-    ContentItem,
-    ContentResult,
-    ContentUpdateRequest,
-    GenerateRequest,
-    GenerateResponse,
-    GenerationPreviewRequest,
-    GenerationPreviewResponse,
-    HealthResponse,
-    ModelListResponse,
-    ResultSaveVoiceRequest,
-    SmokeTestRequest,
-    SmokeTestResponse,
-    StorySegmentResult,
-    StoryStudioGenerateRequest,
-    StoryStudioGenerateResponse,
-    SpeechToSpeechResponse,
     STTResponse,
-    TranslateRequest,
-    TranslateResponse,
     TranscriptSegmentsResponse,
-    TTSRequest,
     UploadedAudioResponse,
-    VoiceConversionJobItem,
-    VoiceConversionResponse,
-    VoiceProfile,
-    VoiceUpdateRequest,
-    YouTubeImportRequest,
-    YouTubeImportResponse,
+    MediaImportRequest,
+    MediaImportResponse,
+    MediaInfoRequest,
+    MediaInfoResponse,
     public_file_url,
 )
-from app.services.audio_effects import apply_output_effects
-from app.services.audio_utils import normalize_reference_audio, normalize_stt_audio, normalize_voice_conversion_audio
-from app.services.content_store import ContentStore
+from app.services.audio_utils import normalize_reference_audio, normalize_stt_audio
 from app.services.generation_helpers import (
-    build_generation_preview,
-    combine_generated_segments,
-    ensure_generated_audio,
-    narration_instruct,
-    parse_narration_script,
     public_audio_url,
-    requested_or_estimated_duration,
-    run_generation_with_progress,
-    transcribe_with_segments,
-    voice_with_reference_transcript,
 )
-from app.services.model_helpers import ensure_adapter_available
-from app.services.model_router import CapabilityUnsupportedError, ModelRouter, ModelUnavailableError
-from app.services.omnivoice_service import (
-    MockVoiceEngine,
-    OmniVoiceEngine,
-    combine_omnivoice_instruct,
-    effective_accent_for_language,
-    get_voice_engine,
-    language_code_to_omnivoice_language,
-)
-from app.services.progress import publish_progress
 from app.services.stt_service import STTProvider
-from app.services.translation_service import OpenAICompatibleTranslator
+from app.services.audio_sample_analysis import (
+    SampleAnalysisRequest, SampleTranscriptRequest, analyze_sample,
+    decode_analysis_audio, resolve_uploaded_audio,
+)
 from app.services.voice_store import VoiceStore
-from app.services.youtube_import_service import import_youtube_audio
 
 router = APIRouter()
 
@@ -81,10 +39,52 @@ def get_main_transcriber():
     return main_module.transcribe_with_segments
 
 
-def get_youtube_importer():
+def get_media_importer():
     from app import main as main_module
 
-    return main_module.import_youtube_audio
+    return main_module.import_media_audio
+
+
+@router.post("/api/audio/sample-analysis")
+def analyze_voice_sample(request: SampleAnalysisRequest, settings: Settings = Depends(get_settings)):
+    try:
+        return analyze_sample(request.audio_url, settings)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/api/audio/sample-transcript", response_model=TranscriptSegmentsResponse)
+def transcribe_sample_window(request: SampleTranscriptRequest, settings: Settings = Depends(get_settings)):
+    if request.end <= request.start or request.end - request.start > 30.01:
+        raise HTTPException(status_code=422, detail="주변 받아쓰기는 한 번에 30초 이하로 선택해 주세요.")
+    try:
+        source = resolve_uploaded_audio(request.audio_url, settings)
+        runtime = settings.storage_dir.resolve() / "runtime" / "sample-transcripts"
+        runtime.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="window-", dir=runtime) as directory:
+            normalized = Path(directory) / "window.wav"
+            decoded_seconds = decode_analysis_audio(source, normalized, start=request.start, end=request.end)
+            actual_end = request.start + decoded_seconds
+            if request.end > actual_end + .25:
+                raise ValueError("받아쓰기 구간이 오디오 길이를 벗어났습니다.")
+            result = get_main_transcriber()(
+                normalized, offset_seconds=request.start, provider=request.provider,
+                language=request.language, settings=settings,
+            )
+            # Keep only finite, meaningful timestamps within the requested source window.
+            for segment in result.segments:
+                if not (math.isfinite(segment.start) and math.isfinite(segment.end)
+                        and request.start <= segment.start < actual_end
+                        and segment.start < segment.end <= actual_end + .25):
+                    raise RuntimeError("받아쓰기의 시간 정보가 선택한 오디오 범위와 맞지 않습니다.")
+                segment.end = min(segment.end, actual_end)
+            return result
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.post("/api/audio/transcript-segments", response_model=TranscriptSegmentsResponse)
@@ -135,26 +135,52 @@ async def upload_audio_source(
     destination.write_bytes(content)
     return UploadedAudioResponse(
         audio_url=public_file_url(destination, "uploads"),
-        audio_path=str(destination),
         filename=audio.filename or destination.name,
     )
 
 
-@router.post("/api/audio/youtube-import", response_model=YouTubeImportResponse)
-def import_youtube_audio_endpoint(
-    request: YouTubeImportRequest,
+def get_media_inspector():
+    from app import main as main_module
+
+    return main_module.inspect_media
+
+
+@router.post("/api/audio/media-info", response_model=MediaInfoResponse)
+def inspect_media_endpoint(
+    request: MediaInfoRequest,
     settings: Settings = Depends(get_settings),
 ):
     try:
-        imported = get_youtube_importer()(request.url, settings, isolate_voice=request.isolate_voice)
+        info = get_media_inspector()(request.url, settings)
     except RuntimeError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return YouTubeImportResponse(
+    return MediaInfoResponse(
+        platform=info.platform,
+        title=info.title,
+        webpage_url=info.webpage_url,
+        duration_seconds=info.duration_seconds,
+        uploader=info.uploader,
+        max_duration_seconds=info.max_duration_seconds,
+    )
+
+
+@router.post("/api/audio/media-import", response_model=MediaImportResponse)
+def import_media_audio_endpoint(
+    request: MediaImportRequest,
+    settings: Settings = Depends(get_settings),
+):
+    try:
+        # The clip range is only forwarded when asked for, so importers without range support keep working.
+        clip = {key: value for key, value in (("start_seconds", request.start_seconds), ("end_seconds", request.end_seconds)) if value is not None}
+        imported = get_media_importer()(request.url, settings, isolate_voice=request.isolate_voice, **clip)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return MediaImportResponse(
+        platform=imported.platform,
         title=imported.title,
         webpage_url=imported.webpage_url,
         duration_seconds=imported.duration_seconds,
         audio_url=public_file_url(imported.audio_path, "uploads"),
-        audio_path=str(imported.audio_path),
         filename=imported.audio_path.name,
         voice_isolated=imported.voice_isolated,
     )

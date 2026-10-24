@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { t } from '$lib/i18n/index.svelte';
+	import HelpPopover from '$lib/components/HelpPopover.svelte';
 	import { languages } from '$lib/studio/api';
 
 	let {
@@ -26,29 +28,27 @@
 
 <aside class="surface inspector stt-settings-card">
 	<div class="inspector-heading">
-		<h2>인식/번역 설정</h2>
-		<p>원본 언어를 알면 인식 정확도가 좋아지고, 변환된 텍스트는 선택한 언어로 번역됩니다.</p>
+		<div class="inline-flex items-center gap-1"><h2 class="inline-flex items-center gap-1">{t('stt.settings')}</h2><HelpPopover label={t('stt.settings')} text={t('stt.settingsHelp')} /></div>
 	</div>
-	<label>인식 엔진
+	<label>{t('stt.engine')}
 		<select class="studio-input" value={sttProvider} onchange={(event) => onSttProviderChange(event.currentTarget.value as 'whisper' | 'apple-speech')}>
 			<option value="whisper">Whisper</option>
 			<option value="apple-speech">Apple Speech</option>
 		</select>
 	</label>
-	<label>원본 언어
+	<label>{t('tts.source.language')}
 		<select class="studio-input" value={language} onchange={(event) => onLanguageChange(event.currentTarget.value)}>
-			<option value="">자동 감지</option>
+			<option value="">{t('stt.auto')}</option>
 			{#each languages as item}<option value={item.code}>{item.label}</option>{/each}
 		</select>
 	</label>
 	<div class="translation-target-picker">
 		<div>
-			<strong>번역 언어</strong>
-			<p>여러 언어를 동시에 선택할 수 있습니다.</p>
+			<strong class="inline-flex items-center gap-1">{t('stt.targets')}<HelpPopover label={t('stt.targets')} text={t('stt.targetsHelp')} /></strong>
 		</div>
 		<div class="button-row wrap stt-lang-row">
 			{#each languages as item}<button class:selected={targets.includes(item.code)} onclick={() => onToggleTarget(item.code)}>{item.label}</button>{/each}
 		</div>
 	</div>
-	<button class="primary-action full" disabled={busy || !hasText} onclick={onTranslate}>{hasText ? '선택 언어로 번역' : '텍스트 변환 후 번역'}</button>
+	<button class="primary-action full" disabled={busy || !hasText} onclick={onTranslate}>{hasText ? t('stt.translate') : t('stt.translateFirst')}</button>
 </aside>

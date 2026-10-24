@@ -1,4 +1,5 @@
 import json
+import os
 import platform
 import shutil
 import subprocess
@@ -6,7 +7,8 @@ from uuid import uuid4
 from pathlib import Path
 from typing import Literal
 
-from app.config import Settings
+from app.config import Settings, get_settings
+from app.model_cache import whisper_download_root
 from app.schemas import TranscriptSegment, TranscriptSegmentsResponse
 
 STTProvider = Literal["whisper", "apple-speech"]
@@ -35,9 +37,20 @@ def apple_speech_helper_binary(settings: Settings) -> Path:
         return binary_path
     macos_dir.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(plist_path, bundled_plist_path)
+    build_dir = settings.storage_dir.resolve() / "bin" / "apple-speech-build"
+    cache_dir = build_dir / "module-cache"
+    temporary_dir = build_dir / "tmp"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    temporary_dir.mkdir(parents=True, exist_ok=True)
+    environment = dict(os.environ)
+    environment.update(TMPDIR=str(temporary_dir), TMP=str(temporary_dir), TEMP=str(temporary_dir))
+    architecture = "arm64" if platform.machine().lower() in {"arm64", "aarch64"} else "x86_64"
     completed = subprocess.run(
         [
-            "swiftc",
+            "/usr/bin/swiftc",
+            "-swift-version", "5",
+            "-target", f"{architecture}-apple-macos12.0",
+            "-module-cache-path", str(cache_dir),
             str(source_path),
             "-o",
             str(binary_path),
@@ -45,7 +58,8 @@ def apple_speech_helper_binary(settings: Settings) -> Path:
         check=False,
         capture_output=True,
         text=True,
-        timeout=60,
+        timeout=90,
+        env=environment,
     )
     if completed.returncode != 0:
         raise RuntimeError(completed.stderr.strip() or "Apple Speech helper build failed.")
@@ -55,19 +69,20 @@ def apple_speech_helper_binary(settings: Settings) -> Path:
         capture_output=True,
         text=True,
         timeout=30,
+        env=environment,
     )
     if signed.returncode != 0:
         raise RuntimeError(signed.stderr.strip() or "Apple Speech helper signing failed.")
     return binary_path
 
 
-def transcribe_with_whisper(audio_path: Path, offset_seconds: float = 0, model_name: str = "base") -> TranscriptSegmentsResponse:
+def transcribe_with_whisper(audio_path: Path, offset_seconds: float = 0, model_name: str = "base", language: str | None = None) -> TranscriptSegmentsResponse:
     try:
         import whisper
     except ImportError as exc:
-        raise RuntimeError("시간대별 텍스트 추출은 openai-whisper 설치가 필요합니다. backend에서 uv sync --extra omnivoice --extra dev 또는 whisper 의존성을 설치해 주세요.") from exc
-    model = whisper.load_model(model_name)
-    result = model.transcribe(str(audio_path))
+        raise RuntimeError("시간대별 텍스트 추출은 openai-whisper 설치가 필요합니다. backend에서 uv sync --extra voxcpm --extra dev를 실행해 주세요.") from exc
+    model = whisper.load_model(model_name, download_root=whisper_download_root(get_settings()))
+    result = model.transcribe(str(audio_path), **({"language": language} if language else {}))
     segments = [
         TranscriptSegment(
             start=float(segment.get("start", 0)) + offset_seconds,
@@ -96,7 +111,7 @@ def transcribe_with_apple_speech(
     try:
         completed = subprocess.run(
             [
-                "open",
+                "/usr/bin/open",
                 "-W",
                 "-n",
                 str(app_dir),
@@ -153,4 +168,4 @@ def transcribe_audio(
         return transcribe_with_apple_speech(audio_path, offset_seconds=offset_seconds, language=language, settings=settings)
     if provider != "whisper":
         raise RuntimeError(f"지원하지 않는 STT provider입니다: {provider}")
-    return transcribe_with_whisper(audio_path, offset_seconds=offset_seconds, model_name=settings.whisper_model)
+    return transcribe_with_whisper(audio_path, offset_seconds=offset_seconds, model_name=settings.whisper_model, language=language)

@@ -4,10 +4,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$ROOT_DIR/backend"
 
-OMNIVOICE=0
 VOXCPM=0
-COSYVOICE=0
-SEED_VC=0
+WHISPER=0
+SOULX_SINGER=0
+STABLE_AUDIO_SFX=0
 INSTALL_DEPS=1
 ASSUME_YES=0
 
@@ -16,16 +16,17 @@ usage() {
 Usage:
   ./download-models.sh --all
   ./download-models.sh --tts
-  ./download-models.sh --omnivoice --voxcpm
-  ./download-models.sh --cosyvoice --seed-vc
+  ./download-models.sh --voxcpm --soulx-singer
+  ./download-models.sh --sfx
+  ./download-models.sh --stt
 
 Options:
   --all          Install backend deps and prepare every supported model.
-  --tts          Prepare TTS models: OmniVoice, VoxCPM2, and CosyVoice.
-  --omnivoice    Pre-download the OmniVoice Hugging Face model cache.
+  --tts          Prepare the VoxCPM2 TTS model.
   --voxcpm       Pre-download the VoxCPM2 Hugging Face model cache.
-  --cosyvoice    Install CosyVoice runtime and download CosyVoice2-0.5B.
-  --seed-vc      Install Seed-VC runtime for voice conversion.
+  --stt          Pre-download the Whisper speech-to-text model.
+  --soulx-singer Install SoulX-Singer AI cover runtime and the required SVC weights.
+  --sfx          Install Stable Audio 3 Small SFX with the Apple Silicon MLX runtime.
   --no-deps      Skip backend uv dependency sync.
   -y, --yes      Skip the confirmation prompt.
   -h, --help     Show this help.
@@ -35,27 +36,25 @@ USAGE
 while (($#)); do
 	case "$1" in
 		--all)
-			OMNIVOICE=1
 			VOXCPM=1
-			COSYVOICE=1
-			SEED_VC=1
+			WHISPER=1
+			SOULX_SINGER=1
+			STABLE_AUDIO_SFX=1
 			;;
 		--tts)
-			OMNIVOICE=1
 			VOXCPM=1
-			COSYVOICE=1
-			;;
-		--omnivoice)
-			OMNIVOICE=1
 			;;
 		--voxcpm)
 			VOXCPM=1
 			;;
-		--cosyvoice)
-			COSYVOICE=1
+		--stt)
+			WHISPER=1
 			;;
-		--seed-vc)
-			SEED_VC=1
+		--soulx-singer)
+			SOULX_SINGER=1
+			;;
+		--sfx)
+			STABLE_AUDIO_SFX=1
 			;;
 		--no-deps)
 			INSTALL_DEPS=0
@@ -76,7 +75,7 @@ while (($#)); do
 	shift
 done
 
-if ((OMNIVOICE == 0 && VOXCPM == 0 && COSYVOICE == 0 && SEED_VC == 0)); then
+if ((VOXCPM == 0 && WHISPER == 0 && SOULX_SINGER == 0 && STABLE_AUDIO_SFX == 0)); then
 	usage
 	exit 0
 fi
@@ -104,11 +103,11 @@ NOTE
 
 print_plan() {
 	echo "Model preparation plan:"
-	((INSTALL_DEPS == 1)) && echo "  - Sync backend dependencies with uv" || echo "  - Skip backend dependency sync"
-	((OMNIVOICE == 1)) && echo "  - Download OmniVoice cache"
-	((VOXCPM == 1)) && echo "  - Download VoxCPM2 cache"
-	((COSYVOICE == 1)) && echo "  - Install CosyVoice runtime and download CosyVoice2-0.5B"
-	((SEED_VC == 1)) && echo "  - Install Seed-VC runtime"
+	if ((INSTALL_DEPS == 1)); then echo "  - Sync backend dependencies with uv"; else echo "  - Skip backend dependency sync"; fi
+	if ((VOXCPM == 1)); then echo "  - Download VoxCPM2 cache"; fi
+	if ((WHISPER == 1)); then echo "  - Download Whisper speech-to-text model"; fi
+	if ((SOULX_SINGER == 1)); then echo "  - Install SoulX-Singer Apple Silicon runtime and SVC weights"; fi
+	if ((STABLE_AUDIO_SFX == 1)); then echo "  - Install Stable Audio 3 Small SFX MLX runtime and weights"; fi
 }
 
 run_backend() {
@@ -116,7 +115,9 @@ run_backend() {
 }
 
 ensure_env_file() {
-	run_backend cp -n .env.example .env
+	if [[ ! -f "$BACKEND_DIR/.env" ]]; then
+		run_backend cp .env.example .env
+	fi
 }
 
 install_backend_deps() {
@@ -124,10 +125,9 @@ install_backend_deps() {
 		return
 	fi
 
-	local sync_command=(uv sync)
-	if ((OMNIVOICE == 1 || VOXCPM == 1)); then
-		((OMNIVOICE == 1)) && sync_command+=(--extra omnivoice)
-		((VOXCPM == 1)) && sync_command+=(--extra voxcpm)
+	local sync_command=(uv sync --locked --inexact)
+	if ((VOXCPM == 1)); then
+		sync_command+=(--extra voxcpm)
 	fi
 	run_backend "${sync_command[@]}"
 
@@ -152,54 +152,89 @@ download_hf_model() {
 	echo "Downloading $label model cache: $model_id"
 	run_backend uv run --with huggingface_hub python - "$model_id" <<'PY'
 import sys
+
 from huggingface_hub import snapshot_download
 
+from app.config import get_settings
+
+# VoxCPM reads its weights from settings.voxcpm_cache_dir, so download to exactly that place.
+cache_dir = get_settings().voxcpm_cache_dir
 model_id = sys.argv[1]
-path = snapshot_download(repo_id=model_id)
+path = snapshot_download(repo_id=model_id, cache_dir=str(cache_dir) if cache_dir else None)
 print(f"Downloaded {model_id} to {path}")
 PY
-}
-
-download_omnivoice() {
-	download_hf_model "OmniVoice" "$(settings_value omnivoice_model_id)"
 }
 
 download_voxcpm() {
 	download_hf_model "VoxCPM2" "$(settings_value voxcpm_model_id)"
 }
 
-setup_cosyvoice() {
-	run_backend uv run python scripts/setup_cosyvoice.py --download-model
+setup_soulx_singer() {
+	run_backend uv run python scripts/setup_soulx_singer.py
 }
 
-setup_seed_vc() {
-	run_backend uv run python scripts/setup_seed_vc.py
+setup_stable_audio_sfx() {
+	local repo_dir="$BACKEND_DIR/vendor/stable-audio-3"
+	if [[ ! -d "$repo_dir/.git" ]]; then
+		git clone --depth 1 https://github.com/Stability-AI/stable-audio-3.git "$repo_dir"
+	fi
+	# Keep the weights inside the project (backend/models) unless the user chose a Hugging Face location.
+	(
+		cd "$repo_dir/optimized/mlx"
+		HF_HOME="${HF_HOME:-$BACKEND_DIR/models/huggingface}" ./install.sh -y --download sm-sfx
+	)
 }
 
-print_env_hint() {
-	cat <<'ENV'
+set_env_value() {
+	local key="$1" value="$2" file="$BACKEND_DIR/.env" tmp
+	tmp="$(mktemp)"
+	if grep -q "^${key}=" "$file"; then
+		awk -v key="$key" -v value="$value" 'BEGIN { prefix = key "=" } index($0, prefix) == 1 { print prefix value; next } { print }' "$file" >"$tmp"
+	else
+		cat "$file" >"$tmp"
+		printf '%s=%s\n' "$key" "$value" >>"$tmp"
+	fi
+	mv "$tmp" "$file"
+}
 
-Recommended backend/.env values after setup:
-CLONE_VOICE_OMNIVOICE_ENABLED=true
-CLONE_VOICE_VOXCPM_ENABLED=true
-CLONE_VOICE_COSYVOICE_ENABLED=true
-CLONE_VOICE_SEED_VC_ENABLED=true
-CLONE_VOICE_COSYVOICE_REPO_DIR=vendor/CosyVoice
-CLONE_VOICE_COSYVOICE_PYTHON=vendor/CosyVoice/.venv/bin/python
-CLONE_VOICE_COSYVOICE_MODEL_DIR=pretrained_models/CosyVoice2-0.5B
-CLONE_VOICE_SEED_VC_REPO_DIR=vendor/seed-vc
-CLONE_VOICE_SEED_VC_PYTHON=vendor/seed-vc/.venv/bin/python
-ENV
+download_whisper() {
+	echo "Downloading Whisper speech-to-text model"
+	run_backend uv run python - <<'PY'
+import whisper
+
+from app.config import get_settings
+from app.model_cache import whisper_download_root
+
+settings = get_settings()
+whisper.load_model(settings.whisper_model, download_root=whisper_download_root(settings))
+print(f"Whisper model ready: {settings.whisper_model}")
+PY
+}
+
+enable_installed_models() {
+	# Turn on exactly what was installed so the app works without hand-editing .env.
+	if ((VOXCPM == 1)); then set_env_value CLONE_VOICE_VOXCPM_ENABLED true; fi
+	if ((SOULX_SINGER == 1)); then
+		set_env_value CLONE_VOICE_SOULX_SINGER_ENABLED true
+		set_env_value CLONE_VOICE_SOULX_SINGER_REPO_DIR vendor/SoulX-Singer-MLX
+		set_env_value CLONE_VOICE_SOULX_SINGER_PYTHON vendor/SoulX-Singer-MLX/.venv/bin/python
+	fi
+	if ((STABLE_AUDIO_SFX == 1)); then
+		set_env_value CLONE_VOICE_STABLE_AUDIO_SFX_ENABLED true
+		set_env_value CLONE_VOICE_STABLE_AUDIO_REPO_DIR vendor/stable-audio-3
+		set_env_value CLONE_VOICE_STABLE_AUDIO_PYTHON vendor/stable-audio-3/optimized/mlx/.venv/bin/python
+	fi
+	echo "Updated backend/.env for the installed models."
 }
 
 confirm
 ensure_env_file
 install_backend_deps
 
-((OMNIVOICE == 1)) && download_omnivoice
-((VOXCPM == 1)) && download_voxcpm
-((COSYVOICE == 1)) && setup_cosyvoice
-((SEED_VC == 1)) && setup_seed_vc
+if ((VOXCPM == 1)); then download_voxcpm; fi
+if ((WHISPER == 1)); then download_whisper; fi
+if ((SOULX_SINGER == 1)); then setup_soulx_singer; fi
+if ((STABLE_AUDIO_SFX == 1)); then setup_stable_audio_sfx; fi
 
-print_env_hint
+enable_installed_models
 echo "Model preparation complete."

@@ -5,15 +5,19 @@
 
 	let {
 		active,
+		ready = true,
+		showAuxiliaryTools = false,
 		onNavigate,
 		children
 	}: {
 		active: MenuKey;
+		ready?: boolean;
+		showAuxiliaryTools?: boolean;
 		onNavigate: (key: MenuKey) => void;
 		children?: Snippet;
 	} = $props();
 </script>
 
-<AppShell {active} {onNavigate}>
+<AppShell {active} {ready} {showAuxiliaryTools} {onNavigate}>
 	{@render children?.()}
 </AppShell>

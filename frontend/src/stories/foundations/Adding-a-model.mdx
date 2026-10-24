@@ -1,0 +1,15 @@
+import { Meta } from '@storybook/addon-docs/blocks';
+
+<Meta title="Foundations/Adding a model" />
+
+# Adding a model
+
+Models are grouped by **area**: `voice`, `music`, `cover` (voice conversion) and `sfx`. An area lists every registered
+model that declares the matching capability, and each workspace shows a `ModelPicker` for its area.
+
+1. Write an adapter in `backend/app/services/` that extends `BaseModelAdapter` and decorate it with `@register_adapter`.
+2. Declare what it can do in `capabilities` (`tts`, `music_generation`, `voice_conversion`, `sound_effect_generation`).
+3. Add its id to `CLONE_VOICE_REGISTERED_MODELS` and, optionally, `homepage`, `license`, `platforms` and `install_command`
+   so the model card can show an install hint.
+
+No frontend change is needed. See `docs/adding-a-model.md` for a complete example.

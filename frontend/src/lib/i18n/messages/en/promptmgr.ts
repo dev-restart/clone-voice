@@ -1,0 +1,32 @@
+import type { promptmgr } from '../ko/promptmgr.ts';
+
+export const promptmgr_en: Record<keyof typeof promptmgr, string> = {
+	'promptmgr.kept': 'Kept your edits. Compare them with the latest version, then save again.',
+	'promptmgr.loaded': 'Loaded the latest saved version.',
+	'promptmgr.length': 'Enter a system prompt of 1–8,000 characters.',
+	'promptmgr.reset': 'Restored the default prompt.',
+	'promptmgr.saved': 'Saved the prompt.',
+	'promptmgr.title': 'Production system prompts',
+	'promptmgr.help': 'Manage the default instructions for sound effects, music, songs and covers. Saved instructions apply from the next AI request. Music and songs produce prompts and lyric drafts; covers get recommended conversion settings.',
+	'promptmgr.refresh': 'Refresh prompts',
+	'promptmgr.errorHint': 'Your edits are kept. Check the connection and the latest saved version.',
+	'promptmgr.busy': 'Working on the prompt…',
+	'promptmgr.kind': 'Prompt for',
+	'promptmgr.custom': 'Using your version',
+	'promptmgr.builtin': 'Using the built-in default',
+	'promptmgr.revision': 'Revision {n}',
+	'promptmgr.system': 'System prompt',
+	'promptmgr.dirty': 'This prompt has unsaved changes.',
+	'promptmgr.clean': 'Saved prompt.',
+	'promptmgr.count': '{count}/8,000 chars',
+	'promptmgr.conflict': 'The prompt was changed on another screen.',
+	'promptmgr.conflictBody': 'Your edit is kept. Compare it with the latest version and choose how to continue.',
+	'promptmgr.latest': 'View the latest version',
+	'promptmgr.latestLabel': 'Latest saved system prompt',
+	'promptmgr.keepMine': 'Keep my edit on top of the latest',
+	'promptmgr.useLatest': 'Discard my edit and use the latest',
+	'promptmgr.save': 'Save prompt',
+	'promptmgr.restore': 'Restore default',
+	'promptmgr.showDefault': 'View the built-in default prompt',
+	'promptmgr.defaultLabel': 'Built-in default system prompt'
+};

@@ -139,6 +139,36 @@ def normalize_voice_conversion_audio(
     return destination
 
 
+def normalize_music_cover_audio(
+    source: Path,
+    destination: Path,
+    trim_start: float | None = None,
+    trim_end: float | None = None,
+) -> Path:
+    """Decode a music source without discarding its stereo accompaniment."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        import librosa
+
+        waveform, sample_rate = librosa.load(str(source), sr=None, mono=False)
+    except Exception as exc:
+        raise RuntimeError(f"AI cover audio could not be decoded. ({exc})") from exc
+    waveform = np.asarray(waveform, dtype=np.float32)
+    if waveform.ndim == 1:
+        waveform = waveform[np.newaxis, :]
+    if trim_start is not None or trim_end is not None:
+        start_sample = max(0, int((trim_start or 0) * sample_rate))
+        end_sample = int(trim_end * sample_rate) if trim_end is not None else waveform.shape[-1]
+        waveform = waveform[:, start_sample:max(start_sample, min(end_sample, waveform.shape[-1]))]
+    if waveform.size == 0 or waveform.shape[-1] == 0:
+        raise RuntimeError("AI cover audio did not contain any samples.")
+    peak = float(np.max(np.abs(waveform))) if waveform.size else 0.0
+    if peak > 1.0:
+        waveform = waveform / peak
+    sf.write(destination, waveform.T, sample_rate)
+    return destination
+
+
 def isolate_speech_audio(
     source: Path,
     destination: Path,
@@ -146,7 +176,7 @@ def isolate_speech_audio(
 ) -> Path:
     """Reduce background music/effects and write a speech-focused mono WAV.
 
-    This is a lightweight local cleanup path for imported YouTube samples. It
+    This is a lightweight local cleanup path for imported media samples. It
     does not guarantee perfect vocal isolation like a dedicated source-separation
     model, but it improves voice-cloning references by keeping the speech band,
     suppressing repetitive background material, and normalizing the result.

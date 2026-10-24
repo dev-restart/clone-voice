@@ -16,6 +16,7 @@ def list_runtime_models(settings: Settings = Depends(get_settings), router: Mode
         models=models,
         default_tts_model=preferences.default_tts_model,
         default_vc_model=preferences.default_vc_model,
+        default_models=preferences.default_models,
         model_preferences=preferences.model_preferences,
     )
 

@@ -1,5 +1,6 @@
 <script lang="ts">
-	import { FilePlus, Pencil, Trash2, Wand2 } from 'lucide-svelte';
+	import { i18n, t } from '$lib/i18n/index.svelte';
+	import { FilePlus, Pencil, Trash2, Wand2 } from '@lucide/svelte';
 	import { audioUrl } from '$lib/studio/api';
 	import type { VoiceConversionJob, VoiceProfile } from '$lib/studio/types';
 
@@ -8,6 +9,10 @@
 		title: string;
 		voice_id: string;
 		model_id: string;
+		source_origin?: 'file' | 'youtube' | 'instagram';
+		source_page_url?: string | null;
+		source_title?: string | null;
+		source_duration_seconds?: number | null;
 		source_audio_url?: string | null;
 		source_audio_name?: string | null;
 		transcript?: string | null;
@@ -29,15 +34,22 @@
 		onOpen: (id: string) => void;
 		onDelete: (id: string) => void;
 	} = $props();
+
+	function sourceOriginLabel(origin?: VoiceChangerProject['source_origin']) {
+		if (origin === 'youtube') return 'YouTube';
+		if (origin === 'instagram') return 'Instagram';
+		return t('cover.origin.upload');
+	}
 </script>
 
 <section class="surface">
 	<div class="section-heading">
 		<div>
-			<h2>보이스 체인저 작업</h2>
-			<p>원본 음성, 대상 목소리, 버전별 변환 결과를 한곳에서 비교합니다.</p>
+			<h2>{t('cover.list.title')}</h2>
 		</div>
-		<button class="primary-action" onclick={onCreate}><FilePlus size={18} />새 작업</button>
+		<div class="button-row">
+			<button class="primary-action" onclick={onCreate}><FilePlus size={18} />{t('cover.list.new')}</button>
+		</div>
 	</div>
 	<div class="voice-change-project-grid">
 		{#each projects as project (project.id)}
@@ -46,29 +58,34 @@
 					<span class="voice-change-project-icon"><Wand2 size={20} /></span>
 					<span>
 						<strong>{project.title}</strong>
-						<small>{project.versions.length}개 버전 · 원본 {project.source_audio_name || '미등록'} · 대상 {voices.find((voice) => voice.id === project.voice_id)?.name ?? '목소리 미선택'} · 최근 수정 {new Date(project.updated_at).toLocaleString('ko-KR')}</small>
-						<p>{project.transcript || '아직 원본 대본이 없습니다.'}</p>
+						<small>
+							{t('cover.list.versions', { count: project.versions.length })} ·
+							{t('cover.list.song', { title: project.source_title || project.source_audio_name || t('cover.list.none') })} ·
+							{t('cover.list.origin', { origin: sourceOriginLabel(project.source_origin) })} ·
+							{t('cover.list.target', { name: voices.find((voice) => voice.id === project.voice_id)?.name ?? t('cover.list.noVoice') })} ·
+							{t('cover.list.edited', { date: new Date(project.updated_at).toLocaleString(i18n.intl) })}
+						</small>
+						<p>{project.transcript || t('cover.list.noLyrics')}</p>
 					</span>
 				</button>
 				{#if project.versions[0]}
 					<div class="story-card-player">
-						<span><Wand2 size={16} />최신 변환 결과</span>
+						<span><Wand2 size={16} />{t('cover.list.latest')}</span>
 						<audio controls src={audioUrl(project.versions[0].output_audio_url)}></audio>
 					</div>
 				{:else}
-					<div class="story-card-empty">아직 생성된 변환 결과가 없습니다.</div>
+					<div class="story-card-empty">{t('cover.list.noCover')}</div>
 				{/if}
 				<div class="button-row">
-					<button class="secondary-action" onclick={() => onOpen(project.id)}><Pencil size={16} />편집</button>
-					<button class="icon-button danger" aria-label="작업 삭제" onclick={() => onDelete(project.id)}><Trash2 size={17} /></button>
+					<button class="secondary-action" onclick={() => onOpen(project.id)}><Pencil size={16} />{t('common.edit')}</button>
+					<button class="icon-button danger" aria-label={t('cover.list.delete')} onclick={() => onDelete(project.id)}><Trash2 size={17} /></button>
 				</div>
 			</article>
 		{:else}
 			<div class="empty-state">
 				<Wand2 size={54} />
-				<h3>아직 보이스 체인저 작업이 없습니다</h3>
-				<p>원본 음성과 대상 목소리를 고르면 변환 버전을 쌓아가며 품질을 비교할 수 있습니다.</p>
-				<button class="primary-action" onclick={onCreate}><FilePlus size={18} />새 작업</button>
+				<h3>{t('cover.list.empty')}</h3>
+				<button class="primary-action" onclick={onCreate}><FilePlus size={18} />{t('cover.make')}</button>
 			</div>
 		{/each}
 	</div>
